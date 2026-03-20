@@ -1,0 +1,24 @@
+# OpsAI — Phase 1 Dependencies
+# Install with: pip install -r requirements.txt
+
+# ── Web Framework ──────────────────────────────────────────────
+fastapi==0.111.0
+uvicorn[standard]==0.29.0
+pydantic==2.7.0
+python-multipart==0.0.9
+
+# ── Data Processing ────────────────────────────────────────────
+pandas==2.2.2
+numpy==1.26.4
+
+# ── Phase 2+ (install now, use later) ─────────────────────────
+sentence-transformers==2.7.0     # RCA embeddings
+faiss-cpu==1.8.0                 # Vector search
+groq==0.9.0                      # Groq LLaMA API
+python-dotenv==1.0.1             # .env file loading
+httpx==0.27.0                    # Async HTTP for API calls
+
+# ── Dev / Testing ──────────────────────────────────────────────
+pytest==8.2.0
+pytest-asyncio==0.23.6
+httpx==0.27.0
