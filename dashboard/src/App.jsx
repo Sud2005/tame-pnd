@@ -4,29 +4,29 @@ const API = "http://localhost:8000";
 
 // ── Design tokens ─────────────────────────────────────────────────────────────
 const COLORS = {
-  bg:       "#0A0E1A",
-  surface:  "#0F1628",
-  card:     "#141D35",
-  border:   "#1E2D50",
-  accent:   "#00D4FF",
-  accentDim:"#0090AA",
-  p1:       "#FF3B5C",
-  p1Dim:    "#3D0F18",
-  p2:       "#FFB020",
-  p2Dim:    "#3D2800",
-  p3:       "#00E676",
-  p3Dim:    "#003D1A",
+  bg: "#0A0E1A",
+  surface: "#0F1628",
+  card: "#141D35",
+  border: "#1E2D50",
+  accent: "#00D4FF",
+  accentDim: "#0090AA",
+  p1: "#FF3B5C",
+  p1Dim: "#3D0F18",
+  p2: "#FFB020",
+  p2Dim: "#3D2800",
+  p3: "#00E676",
+  p3Dim: "#003D1A",
   critical: "#FF3B5C",
-  medium:   "#FFB020",
-  low:      "#00E676",
-  text:     "#E8EDF8",
-  textDim:  "#6B7A9E",
-  success:  "#00E676",
-  danger:   "#FF3B5C",
+  medium: "#FFB020",
+  low: "#00E676",
+  text: "#E8EDF8",
+  textDim: "#6B7A9E",
+  success: "#00E676",
+  danger: "#FF3B5C",
 };
 
-const SEV_COLOR  = { P1: COLORS.p1,  P2: COLORS.p2,  P3: COLORS.p3  };
-const SEV_DIM    = { P1: COLORS.p1Dim,P2: COLORS.p2Dim,P3: COLORS.p3Dim };
+const SEV_COLOR = { P1: COLORS.p1, P2: COLORS.p2, P3: COLORS.p3 };
+const SEV_DIM = { P1: COLORS.p1Dim, P2: COLORS.p2Dim, P3: COLORS.p3Dim };
 const RISK_COLOR = { Critical: COLORS.critical, Medium: COLORS.medium, Low: COLORS.low };
 const PATH_LABEL = { A: "AUTO-EXECUTE", B: "APPROVAL REQUIRED", C: "SENIOR REVIEW" };
 
@@ -77,7 +77,7 @@ const GLOBAL_CSS = `
 
 function Badge({ label, color, dim, size = "sm" }) {
   const pad = size === "lg" ? "6px 14px" : "3px 10px";
-  const fs  = size === "lg" ? "11px" : "10px";
+  const fs = size === "lg" ? "11px" : "10px";
   return (
     <span className="mono" style={{
       background: dim || color + "22",
@@ -171,10 +171,10 @@ async function apiFetch(path, opts = {}) {
 
 // ── Screen 1: Live Ticket Feed ────────────────────────────────────────────────
 function TicketFeed({ onSelectTicket, selected }) {
-  const [tickets, setTickets]   = useState([]);
-  const [stats, setStats]       = useState({});
-  const [loading, setLoading]   = useState(true);
-  const [filter, setFilter]     = useState("all");
+  const [tickets, setTickets] = useState([]);
+  const [stats, setStats] = useState({});
+  const [loading, setLoading] = useState(true);
+  const [filter, setFilter] = useState("all");
   const prevIds = useRef(new Set());
 
   const load = useCallback(async () => {
@@ -200,12 +200,12 @@ function TicketFeed({ onSelectTicket, selected }) {
   const visible = filter === "all" ? tickets : tickets.filter(t => t.severity === filter);
 
   const statCards = [
-    { label: "TOTAL",    val: stats.total_tickets   || 0, color: COLORS.accent },
-    { label: "OPEN",     val: stats.open_tickets    || 0, color: COLORS.p2 },
-    { label: "P1 OPEN",  val: stats.p1_open         || 0, color: COLORS.p1 },
-    { label: "PENDING",  val: stats.pending_approval|| 0, color: COLORS.p2 },
-    { label: "RESOLVED", val: stats.resolved        || 0, color: COLORS.p3 },
-    { label: "RCA DONE", val: stats.rca_completed   || 0, color: COLORS.accent },
+    { label: "TOTAL", val: stats.total_tickets || 0, color: COLORS.accent },
+    { label: "OPEN", val: stats.open_tickets || 0, color: COLORS.p2 },
+    { label: "P1 OPEN", val: stats.p1_open || 0, color: COLORS.p1 },
+    { label: "PENDING", val: stats.pending_approval || 0, color: COLORS.p2 },
+    { label: "RESOLVED", val: stats.resolved || 0, color: COLORS.p3 },
+    { label: "RCA DONE", val: stats.rca_completed || 0, color: COLORS.accent },
   ];
 
   return (
@@ -227,7 +227,7 @@ function TicketFeed({ onSelectTicket, selected }) {
           <span style={{ fontSize: 13, fontWeight: 600, color: COLORS.textDim }}>LIVE FEED</span>
         </div>
         <div style={{ display: "flex", gap: 6 }}>
-          {["all","P1","P2","P3"].map(f => (
+          {["all", "P1", "P2", "P3"].map(f => (
             <button key={f} onClick={() => setFilter(f)} style={{
               padding: "4px 12px", borderRadius: 4, border: "none", cursor: "pointer",
               fontSize: 11, fontWeight: 700, fontFamily: "inherit",
@@ -257,9 +257,9 @@ function TicketFeed({ onSelectTicket, selected }) {
 }
 
 function TicketRow({ ticket: t, selected, onClick, isNew, delay }) {
-  const sev   = t.severity || "P3";
+  const sev = t.severity || "P3";
   const color = SEV_COLOR[sev];
-  const dim   = SEV_DIM[sev];
+  const dim = SEV_DIM[sev];
   const statusColor = {
     open: COLORS.p2, pending_approval: COLORS.accent,
     resolved: COLORS.p3, default: COLORS.textDim,
@@ -281,15 +281,17 @@ function TicketRow({ ticket: t, selected, onClick, isNew, delay }) {
           <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6, flexWrap: "wrap" }}>
             <Badge label={sev} color={color} dim={dim} />
             <Badge label={t.category || "General"} color={COLORS.textDim} />
-            <Badge label={t.status?.replace("_"," ").toUpperCase()} color={statusColor} />
+            <Badge label={t.status?.replace("_", " ").toUpperCase()} color={statusColor} />
             {isNew && <Badge label="NEW" color={COLORS.accent} />}
           </div>
-          <div style={{ fontSize: 13, fontWeight: 500, color: COLORS.text,
-            overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+          <div style={{
+            fontSize: 13, fontWeight: 500, color: COLORS.text,
+            overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap"
+          }}>
             {t.description}
           </div>
           <div className="mono" style={{ fontSize: 10, color: COLORS.textDim, marginTop: 5 }}>
-            {t.id}  ·  {t.opened_at?.slice(0,16) || "–"}
+            {t.id}  ·  {t.opened_at?.slice(0, 16) || "–"}
           </div>
         </div>
         <div style={{ marginLeft: 12, textAlign: "right", flexShrink: 0 }}>
@@ -302,7 +304,7 @@ function TicketRow({ ticket: t, selected, onClick, isNew, delay }) {
 
 // ── Screen 2: RCA Detail ──────────────────────────────────────────────────────
 function RCADetail({ ticket, onApprove }) {
-  const [rca,  setRca]  = useState(null);
+  const [rca, setRca] = useState(null);
   const [pred, setPred] = useState(null);
   const [loading, setLoading] = useState(false);
   const [triggering, setTriggering] = useState(false);
@@ -331,8 +333,10 @@ function RCADetail({ ticket, onApprove }) {
   }
 
   if (!ticket) return (
-    <div style={{ height: "100%", display: "flex", alignItems: "center",
-      justifyContent: "center", flexDirection: "column", gap: 12, color: COLORS.textDim }}>
+    <div style={{
+      height: "100%", display: "flex", alignItems: "center",
+      justifyContent: "center", flexDirection: "column", gap: 12, color: COLORS.textDim
+    }}>
       <div style={{ fontSize: 40 }}>←</div>
       <div style={{ fontSize: 14 }}>Select a ticket to view RCA</div>
     </div>
@@ -355,8 +359,10 @@ function RCADetail({ ticket, onApprove }) {
             <div className="mono" style={{ fontSize: 11, color: COLORS.textDim }}>{ticket.id}</div>
           </div>
           {rca && (
-            <div style={{ textAlign: "center", padding: "12px 20px",
-              background: riskColor + "15", border: `1px solid ${riskColor}44`, borderRadius: 8 }}>
+            <div style={{
+              textAlign: "center", padding: "12px 20px",
+              background: riskColor + "15", border: `1px solid ${riskColor}44`, borderRadius: 8
+            }}>
               <div style={{ fontSize: 10, color: COLORS.textDim, letterSpacing: "0.1em" }}>RISK TIER</div>
               <div style={{ fontSize: 20, fontWeight: 800, color: riskColor }}>{rca.risk_tier}</div>
             </div>
@@ -404,8 +410,10 @@ function RCADetail({ ticket, onApprove }) {
               {rca.root_cause}
             </div>
             {rca.pattern_match && (
-              <div style={{ fontSize: 12, color: COLORS.accent, padding: "8px 12px",
-                background: COLORS.accent + "10", borderRadius: 6, borderLeft: `3px solid ${COLORS.accent}` }}>
+              <div style={{
+                fontSize: 12, color: COLORS.accent, padding: "8px 12px",
+                background: COLORS.accent + "10", borderRadius: 6, borderLeft: `3px solid ${COLORS.accent}`
+              }}>
                 Pattern: {rca.pattern_match}
               </div>
             )}
@@ -424,7 +432,7 @@ function RCADetail({ ticket, onApprove }) {
                 }}>
                   <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
                     <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                      <Badge label={`#${i+1}`} color={COLORS.accent} />
+                      <Badge label={`#${i + 1}`} color={COLORS.accent} />
                       {s.severity && <Badge label={s.severity} color={SEV_COLOR[s.severity] || COLORS.textDim} />}
                     </div>
                     <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -432,11 +440,11 @@ function RCADetail({ ticket, onApprove }) {
                     </div>
                   </div>
                   <div style={{ fontSize: 12, color: COLORS.text, marginBottom: 6 }}>
-                    {s.description?.slice(0,100) || "–"}
+                    {s.description?.slice(0, 100) || "–"}
                   </div>
                   {(s.resolution || s.resolution_notes) && (
                     <div style={{ fontSize: 11, color: COLORS.p3, fontStyle: "italic" }}>
-                      ✓ {(s.resolution || s.resolution_notes)?.slice(0,120)}
+                      ✓ {(s.resolution || s.resolution_notes)?.slice(0, 120)}
                     </div>
                   )}
                   {s.mttr_hrs && (
@@ -466,22 +474,26 @@ function RCADetail({ ticket, onApprove }) {
                       background: COLORS.accent + "20", color: COLORS.accent,
                       display: "flex", alignItems: "center", justifyContent: "center",
                       fontSize: 10, fontWeight: 700, flexShrink: 0,
-                    }}>{i+1}</div>
+                    }}>{i + 1}</div>
                     <div style={{ fontSize: 13, color: COLORS.textDim, lineHeight: 1.5 }}>{step}</div>
                   </div>
                 ))}
               </div>
             )}
             {rca.estimated_resolution_hrs && (
-              <div className="mono" style={{ fontSize: 11, color: COLORS.textDim, marginTop: 12,
-                paddingTop: 12, borderTop: `1px solid ${COLORS.border}` }}>
+              <div className="mono" style={{
+                fontSize: 11, color: COLORS.textDim, marginTop: 12,
+                paddingTop: 12, borderTop: `1px solid ${COLORS.border}`
+              }}>
                 Est. resolution: {rca.estimated_resolution_hrs} hrs
               </div>
             )}
             {rca.warnings && (
-              <div style={{ marginTop: 12, padding: "8px 12px",
+              <div style={{
+                marginTop: 12, padding: "8px 12px",
                 background: COLORS.p1 + "10", borderRadius: 6, borderLeft: `3px solid ${COLORS.p1}`,
-                fontSize: 12, color: COLORS.p1 }}>
+                fontSize: 12, color: COLORS.p1
+              }}>
                 ⚠ {rca.warnings}
               </div>
             )}
@@ -494,9 +506,11 @@ function RCADetail({ ticket, onApprove }) {
                 SOURCE CITATIONS
               </div>
               {rca.source_citations.map((c, i) => (
-                <div key={i} className="mono" style={{ fontSize: 11, color: COLORS.textDim,
-                  padding: "4px 0", borderBottom: i < rca.source_citations.length-1 ? `1px solid ${COLORS.border}` : "none" }}>
-                  [{i+1}] {c}
+                <div key={i} className="mono" style={{
+                  fontSize: 11, color: COLORS.textDim,
+                  padding: "4px 0", borderBottom: i < rca.source_citations.length - 1 ? `1px solid ${COLORS.border}` : "none"
+                }}>
+                  [{i + 1}] {c}
                 </div>
               ))}
             </Card>
@@ -521,22 +535,24 @@ function RCADetail({ ticket, onApprove }) {
 function ApprovalWorkflow({ ticket, rca, onComplete }) {
   const [reason, setReason] = useState("");
   const [loading, setLoading] = useState(false);
-  const [result, setResult]   = useState(null);
+  const [result, setResult] = useState(null);
   const [countdown, setCountdown] = useState(null);
   const countRef = useRef(null);
 
   if (!ticket) return (
-    <div style={{ height: "100%", display: "flex", alignItems: "center",
-      justifyContent: "center", color: COLORS.textDim, flexDirection: "column", gap: 12 }}>
+    <div style={{
+      height: "100%", display: "flex", alignItems: "center",
+      justifyContent: "center", color: COLORS.textDim, flexDirection: "column", gap: 12
+    }}>
       <div style={{ fontSize: 40 }}>⚙</div>
       <div style={{ fontSize: 14 }}>Select a ticket and run RCA first</div>
     </div>
   );
 
-  const conf     = rca?.confidence_score || 50;
-  const risk     = rca?.risk_tier || "Medium";
-  const path     = ticket.severity === "P1" || risk === "Critical" ? "C"
-                 : conf >= 85 && risk === "Low" ? "A" : "B";
+  const conf = rca?.confidence_score || 50;
+  const risk = rca?.risk_tier || "Medium";
+  const path = ticket.severity === "P1" || risk === "Critical" ? "C"
+    : conf >= 85 && risk === "Low" ? "A" : "B";
   const riskColor = RISK_COLOR[risk] || COLORS.textDim;
 
   async function executeAction(action) {
@@ -599,9 +615,11 @@ function ApprovalWorkflow({ ticket, rca, onComplete }) {
     const color = isSuccess ? COLORS.p3 : isCancelled ? COLORS.p2 : COLORS.p1;
 
     return (
-      <div className="fade-in" style={{ height: "100%", display: "flex",
+      <div className="fade-in" style={{
+        height: "100%", display: "flex",
         flexDirection: "column", alignItems: "center", justifyContent: "center",
-        padding: 40, gap: 20, textAlign: "center" }}>
+        padding: 40, gap: 20, textAlign: "center"
+      }}>
         <div style={{ fontSize: 56 }}>
           {isSuccess ? "✅" : isCancelled ? "⏹" : "❌"}
         </div>
@@ -610,7 +628,7 @@ function ApprovalWorkflow({ ticket, rca, onComplete }) {
         </div>
         <Card style={{ padding: 24, width: "100%", maxWidth: 480, textAlign: "left" }}>
           <div className="mono" style={{ fontSize: 12, display: "flex", flexDirection: "column", gap: 8 }}>
-            {Object.entries(result).map(([k,v]) => (
+            {Object.entries(result).map(([k, v]) => (
               <div key={k} style={{ display: "flex", gap: 12 }}>
                 <span style={{ color: COLORS.textDim, minWidth: 130 }}>{k}</span>
                 <span style={{ color: COLORS.text }}>{String(v)}</span>
@@ -619,9 +637,11 @@ function ApprovalWorkflow({ ticket, rca, onComplete }) {
           </div>
         </Card>
         {isSuccess && (
-          <div style={{ padding: "12px 20px", background: COLORS.p3 + "15",
+          <div style={{
+            padding: "12px 20px", background: COLORS.p3 + "15",
             border: `1px solid ${COLORS.p3}33`, borderRadius: 8,
-            fontSize: 12, color: COLORS.p3 }}>
+            fontSize: 12, color: COLORS.p3
+          }}>
             Resolution added to AI memory — future similar tickets will benefit
           </div>
         )}
@@ -636,8 +656,10 @@ function ApprovalWorkflow({ ticket, rca, onComplete }) {
 
   // ── Path A: Auto-execute ─────────────────────────────────────────────────────
   if (path === "A") return (
-    <div style={{ height: "100%", display: "flex", flexDirection: "column",
-      alignItems: "center", justifyContent: "center", padding: 40, gap: 20 }}>
+    <div style={{
+      height: "100%", display: "flex", flexDirection: "column",
+      alignItems: "center", justifyContent: "center", padding: 40, gap: 20
+    }}>
       <PathHeader path="A" risk={risk} conf={conf} riskColor={riskColor} />
       <Card style={{ padding: 32, width: "100%", maxWidth: 520, textAlign: "center" }}>
         <div style={{ fontSize: 13, color: COLORS.textDim, marginBottom: 20 }}>
@@ -649,8 +671,10 @@ function ApprovalWorkflow({ ticket, rca, onComplete }) {
         </div>
         {countdown !== null ? (
           <div>
-            <div style={{ fontSize: 64, fontWeight: 800, color: COLORS.accent,
-              animation: "auto-execute 1s ease infinite", fontFamily: "JetBrains Mono, monospace" }}>
+            <div style={{
+              fontSize: 64, fontWeight: 800, color: COLORS.accent,
+              animation: "auto-execute 1s ease infinite", fontFamily: "JetBrains Mono, monospace"
+            }}>
               {countdown}
             </div>
             <div style={{ fontSize: 12, color: COLORS.textDim, margin: "8px 0 20px" }}>
@@ -679,8 +703,10 @@ function ApprovalWorkflow({ ticket, rca, onComplete }) {
 
   // ── Path B: Single approval ───────────────────────────────────────────────────
   if (path === "B") return (
-    <div style={{ height: "100%", display: "flex", flexDirection: "column",
-      alignItems: "center", justifyContent: "center", padding: 40, gap: 20 }}>
+    <div style={{
+      height: "100%", display: "flex", flexDirection: "column",
+      alignItems: "center", justifyContent: "center", padding: 40, gap: 20
+    }}>
       <PathHeader path="B" risk={risk} conf={conf} riskColor={riskColor} />
       <Card style={{ padding: 28, width: "100%", maxWidth: 520 }}>
         <div style={{ fontSize: 14, fontWeight: 600, color: COLORS.text, marginBottom: 8 }}>
@@ -709,13 +735,17 @@ function ApprovalWorkflow({ ticket, rca, onComplete }) {
 
   // ── Path C: Mandatory review ──────────────────────────────────────────────────
   return (
-    <div style={{ height: "100%", display: "flex", flexDirection: "column",
-      alignItems: "center", justifyContent: "center", padding: 40, gap: 20 }}>
+    <div style={{
+      height: "100%", display: "flex", flexDirection: "column",
+      alignItems: "center", justifyContent: "center", padding: 40, gap: 20
+    }}>
       <PathHeader path="C" risk={risk} conf={conf} riskColor={riskColor} />
       <Card style={{ padding: 28, width: "100%", maxWidth: 560 }}>
-        <div style={{ padding: "12px 16px", background: COLORS.p1 + "15",
+        <div style={{
+          padding: "12px 16px", background: COLORS.p1 + "15",
           borderRadius: 6, borderLeft: `3px solid ${COLORS.p1}`,
-          fontSize: 12, color: COLORS.p1, marginBottom: 20 }}>
+          fontSize: 12, color: COLORS.p1, marginBottom: 20
+        }}>
           ⚠ Critical risk — written justification required before execution
         </div>
         <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 6 }}>Proposed Action</div>
@@ -738,13 +768,13 @@ function ApprovalWorkflow({ ticket, rca, onComplete }) {
         </div>
         <button onClick={() => executeAction("senior_approve")}
           disabled={reason.length < 20 || loading} style={{
-          width: "100%", padding: "14px", background: reason.length >= 20 ? COLORS.p1 : COLORS.border,
-          color: reason.length >= 20 ? "#fff" : COLORS.textDim,
-          border: "none", borderRadius: 8, fontSize: 14, fontWeight: 800,
-          cursor: reason.length >= 20 && !loading ? "pointer" : "not-allowed",
-          fontFamily: "inherit", transition: "all 0.2s",
-        }}>
-          {loading ? <span style={{ display:"flex",alignItems:"center",justifyContent:"center",gap:8 }}>
+            width: "100%", padding: "14px", background: reason.length >= 20 ? COLORS.p1 : COLORS.border,
+            color: reason.length >= 20 ? "#fff" : COLORS.textDim,
+            border: "none", borderRadius: 8, fontSize: 14, fontWeight: 800,
+            cursor: reason.length >= 20 && !loading ? "pointer" : "not-allowed",
+            fontFamily: "inherit", transition: "all 0.2s",
+          }}>
+          {loading ? <span style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}>
             <Spinner /> Executing with audit log...
           </span> : "EXECUTE WITH FULL AUDIT TRAIL"}
         </button>
@@ -762,8 +792,10 @@ function PathHeader({ path, risk, conf, riskColor }) {
   const { title, sub } = labels[path];
   return (
     <div style={{ textAlign: "center" }}>
-      <div style={{ fontSize: 13, fontWeight: 800, letterSpacing: "0.08em",
-        color: riskColor, marginBottom: 4 }}>{title}</div>
+      <div style={{
+        fontSize: 13, fontWeight: 800, letterSpacing: "0.08em",
+        color: riskColor, marginBottom: 4
+      }}>{title}</div>
       <div style={{ fontSize: 12, color: COLORS.textDim }}>{sub}</div>
       <div style={{ display: "flex", gap: 12, justifyContent: "center", marginTop: 12 }}>
         <Badge label={`RISK: ${risk}`} color={riskColor} size="lg" />
@@ -778,7 +810,7 @@ function PathHeader({ path, risk, conf, riskColor }) {
 function AuditTrail() {
   const [events, setEvents] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [filter, setFilter]   = useState("ALL");
+  const [filter, setFilter] = useState("ALL");
 
   useEffect(() => {
     async function load() {
@@ -791,19 +823,19 @@ function AuditTrail() {
     return () => clearInterval(i);
   }, []);
 
-  const EVENT_TYPES = ["ALL","INGEST","PREDICT","RCA","APPROVE","EXECUTE","ROLLBACK","RESOLVE"];
+  const EVENT_TYPES = ["ALL", "INGEST", "PREDICT", "RCA", "APPROVE", "EXECUTE", "ROLLBACK", "RESOLVE"];
   const visible = filter === "ALL" ? events : events.filter(e => e.event_type === filter);
 
   function exportCSV() {
     if (!visible.length) return;
     const headers = Object.keys(visible[0]).join(",");
     const rows = visible.map(e =>
-      Object.values(e).map(v => `"${String(v||"").replace(/"/g,'""')}"`).join(",")
+      Object.values(e).map(v => `"${String(v || "").replace(/"/g, '""')}"`).join(",")
     );
-    const csv  = [headers, ...rows].join("\n");
+    const csv = [headers, ...rows].join("\n");
     const blob = new Blob([csv], { type: "text/csv" });
-    const url  = URL.createObjectURL(blob);
-    const a    = document.createElement("a");
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
     a.href = url; a.download = `opsai_audit_${Date.now()}.csv`;
     a.click(); URL.revokeObjectURL(url);
   }
@@ -846,7 +878,7 @@ function AuditTrail() {
         <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
           <thead>
             <tr style={{ position: "sticky", top: 0, background: COLORS.surface }}>
-              {["TIMESTAMP","EVENT","TICKET","OPERATOR","PATH","CONFIDENCE","RISK","ACTION","OUTCOME"].map(h => (
+              {["TIMESTAMP", "EVENT", "TICKET", "OPERATOR", "PATH", "CONFIDENCE", "RISK", "ACTION", "OUTCOME"].map(h => (
                 <th key={h} className="mono" style={{
                   padding: "8px 10px", textAlign: "left", fontSize: 9,
                   color: COLORS.textDim, letterSpacing: "0.08em",
@@ -863,15 +895,15 @@ function AuditTrail() {
                   borderBottom: `1px solid ${COLORS.border}22`,
                   transition: "background 0.1s",
                 }} onMouseEnter={el => el.currentTarget.style.background = COLORS.border + "44"}
-                   onMouseLeave={el => el.currentTarget.style.background = "transparent"}>
+                  onMouseLeave={el => el.currentTarget.style.background = "transparent"}>
                   <td className="mono" style={{ padding: "8px 10px", color: COLORS.textDim, fontSize: 10, whiteSpace: "nowrap" }}>
-                    {e.timestamp?.slice(0,16) || "–"}
+                    {e.timestamp?.slice(0, 16) || "–"}
                   </td>
                   <td style={{ padding: "8px 10px" }}>
                     <Badge label={e.event_type} color={eColor} />
                   </td>
                   <td className="mono" style={{ padding: "8px 10px", color: COLORS.accent, fontSize: 10 }}>
-                    {e.ticket_id?.slice(0,14) || "–"}
+                    {e.ticket_id?.slice(0, 14) || "–"}
                   </td>
                   <td className="mono" style={{ padding: "8px 10px", color: COLORS.textDim, fontSize: 10 }}>
                     {e.operator_id || "system"}
@@ -885,9 +917,11 @@ function AuditTrail() {
                   <td style={{ padding: "8px 10px" }}>
                     {e.risk_tier && <Badge label={e.risk_tier} color={RISK_COLOR[e.risk_tier] || COLORS.textDim} />}
                   </td>
-                  <td style={{ padding: "8px 10px", maxWidth: 200, overflow: "hidden",
-                    textOverflow: "ellipsis", whiteSpace: "nowrap", color: COLORS.text, fontSize: 11 }}>
-                    {e.action_taken || e.reasoning?.slice(0,60) || "–"}
+                  <td style={{
+                    padding: "8px 10px", maxWidth: 200, overflow: "hidden",
+                    textOverflow: "ellipsis", whiteSpace: "nowrap", color: COLORS.text, fontSize: 11
+                  }}>
+                    {e.action_taken || e.reasoning?.slice(0, 60) || "–"}
                   </td>
                   <td style={{ padding: "8px 10px" }}>
                     {e.outcome && (
@@ -908,13 +942,224 @@ function AuditTrail() {
     </div>
   );
 }
+// ── Add this component to your App.jsx ───────────────────────────────────────
+// Place it after the AuditTrail component, before the Main App Shell section
+
+function IngestForm({ onIngested }) {
+  const [open, setOpen] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [result, setResult] = useState(null);
+  const [form, setForm] = useState({
+    description: "",
+    ci_cat: "storage",
+    ci_subcat: "",
+    urgency: "3",
+    impact: "3",
+    alert_status: "False",
+    source: "manual",
+  });
+
+  // Quick-fill presets for demo
+  const PRESETS = [
+    {
+      label: "🔴 P1 DB Outage",
+      data: {
+        description: "Production database completely unresponsive — all users locked out, entire application down",
+        ci_cat: "storage", urgency: "1", impact: "1", alert_status: "True",
+      }
+    },
+    {
+      label: "🔴 P1 Security",
+      data: {
+        description: "Unauthorized access detected on payment processing server, possible data breach in progress",
+        ci_cat: "application", urgency: "1", impact: "1", alert_status: "True",
+      }
+    },
+    {
+      label: "🟡 P2 Network",
+      data: {
+        description: "Intermittent packet loss on payment network segment, some transactions timing out",
+        ci_cat: "network", urgency: "2", impact: "2", alert_status: "False",
+      }
+    },
+    {
+      label: "🟡 P2 App Slow",
+      data: {
+        description: "Web based application responding slowly, users reporting timeout errors on checkout",
+        ci_cat: "subapplication", urgency: "2", impact: "3", alert_status: "False",
+      }
+    },
+    {
+      label: "🟢 P3 Certificate",
+      data: {
+        description: "SSL certificate expiring in 14 days on internal monitoring dashboard",
+        ci_cat: "", urgency: "4", impact: "4", alert_status: "False",
+      }
+    },
+  ];
+
+  async function submit() {
+    if (!form.description.trim()) return;
+    setLoading(true);
+    setResult(null);
+    const data = await apiFetch("/tickets/ingest", {
+      method: "POST",
+      body: JSON.stringify(form),
+    });
+    setLoading(false);
+    if (data) {
+      setResult(data);
+      if (onIngested) onIngested(data);
+      // Reset description only, keep other fields
+      setForm(f => ({ ...f, description: "" }));
+    }
+  }
+
+  const CI_CATS = ["storage", "application", "subapplication", "network", "hardware", ""];
+
+  return (
+    <>
+      {/* Floating trigger button */}
+      <button onClick={() => setOpen(o => !o)} style={{
+        position: "fixed", bottom: 40, right: 40,
+        width: 52, height: 52, borderRadius: "50%",
+        background: COLORS.accent, color: COLORS.bg,
+        border: "none", cursor: "pointer", fontSize: 22,
+        boxShadow: `0 0 0 0 ${COLORS.accent}`,
+        animation: "auto-execute 2s ease infinite",
+        zIndex: 100, display: "flex", alignItems: "center", justifyContent: "center",
+        fontWeight: 800,
+      }} title="Ingest new ticket">
+        {open ? "✕" : "+"}
+      </button>
+
+      {/* Modal */}
+      {open && (
+        <div style={{
+          position: "fixed", inset: 0, background: "rgba(0,0,0,0.7)",
+          zIndex: 99, display: "flex", alignItems: "center", justifyContent: "center",
+          animation: "fade-in 0.2s ease",
+        }} onClick={e => { if (e.target === e.currentTarget) setOpen(false); }}>
+          <div style={{
+            width: 560, background: COLORS.card,
+            border: `1px solid ${COLORS.border}`, borderRadius: 12,
+            padding: 28, animation: "slide-in 0.25s ease",
+          }}>
+            <div style={{ fontSize: 16, fontWeight: 800, marginBottom: 6 }}>
+              Ingest New Ticket
+            </div>
+            <div style={{ fontSize: 12, color: COLORS.textDim, marginBottom: 20 }}>
+              Submits to live API → triggers AI prediction + RCA automatically
+            </div>
+
+            {/* Quick presets */}
+            <div style={{ fontSize: 10, color: COLORS.textDim, letterSpacing: "0.1em", marginBottom: 8 }}>
+              QUICK PRESETS
+            </div>
+            <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 20 }}>
+              {PRESETS.map(p => (
+                <button key={p.label} onClick={() => setForm(f => ({ ...f, ...p.data }))} style={{
+                  padding: "5px 12px", borderRadius: 4, border: `1px solid ${COLORS.border}`,
+                  background: COLORS.surface, color: COLORS.text, fontSize: 11,
+                  cursor: "pointer", fontFamily: "inherit", fontWeight: 600,
+                }}>{p.label}</button>
+              ))}
+            </div>
+
+            {/* Description */}
+            <div style={{ fontSize: 12, color: COLORS.textDim, marginBottom: 6 }}>DESCRIPTION *</div>
+            <textarea
+              value={form.description}
+              onChange={e => setForm(f => ({ ...f, description: e.target.value }))}
+              placeholder="Describe the incident in plain English..."
+              rows={3}
+              style={{
+                width: "100%", padding: "10px 12px", marginBottom: 16,
+                background: COLORS.surface, border: `1px solid ${COLORS.border}`,
+                borderRadius: 6, color: COLORS.text, fontSize: 13,
+                fontFamily: "inherit", resize: "vertical", outline: "none",
+              }}
+            />
+
+            {/* Fields row */}
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 10, marginBottom: 20 }}>
+              {[
+                { key: "ci_cat", label: "CI CATEGORY", type: "select", options: CI_CATS },
+                { key: "urgency", label: "URGENCY", type: "select", options: ["1", "2", "3", "4"] },
+                { key: "impact", label: "IMPACT", type: "select", options: ["1", "2", "3", "4"] },
+                { key: "alert_status", label: "ALERT", type: "select", options: ["False", "True"] },
+              ].map(field => (
+                <div key={field.key}>
+                  <div className="mono" style={{ fontSize: 9, color: COLORS.textDim, marginBottom: 4, letterSpacing: "0.08em" }}>
+                    {field.label}
+                  </div>
+                  <select
+                    value={form[field.key]}
+                    onChange={e => setForm(f => ({ ...f, [field.key]: e.target.value }))}
+                    style={{
+                      width: "100%", padding: "6px 8px",
+                      background: COLORS.surface, border: `1px solid ${COLORS.border}`,
+                      borderRadius: 4, color: COLORS.text, fontSize: 12,
+                      fontFamily: "inherit", outline: "none", cursor: "pointer",
+                    }}
+                  >
+                    {field.options.map(o => (
+                      <option key={o} value={o}>{o || "(none)"}</option>
+                    ))}
+                  </select>
+                </div>
+              ))}
+            </div>
+
+            {/* Result */}
+            {result && (
+              <div style={{
+                padding: "10px 14px", borderRadius: 6, marginBottom: 16,
+                background: COLORS.p3 + "15", border: `1px solid ${COLORS.p3}33`,
+              }}>
+                <div className="mono" style={{ fontSize: 11, color: COLORS.p3 }}>
+                  ✓ Ingested: {result.id} · Severity: {result.severity} · {result.message?.slice(0, 60)}
+                </div>
+                {result.anomaly_flags?.length > 0 && (
+                  <div className="mono" style={{ fontSize: 10, color: COLORS.p2, marginTop: 4 }}>
+                    ⚠ Anomaly flags: {result.anomaly_flags.join(", ")}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Buttons */}
+            <div style={{ display: "flex", gap: 10 }}>
+              <button onClick={submit} disabled={!form.description.trim() || loading} style={{
+                flex: 1, padding: "12px", background: form.description.trim() ? COLORS.accent : COLORS.border,
+                color: form.description.trim() ? COLORS.bg : COLORS.textDim,
+                border: "none", borderRadius: 6, fontSize: 13, fontWeight: 800,
+                cursor: form.description.trim() && !loading ? "pointer" : "not-allowed",
+                fontFamily: "inherit",
+              }}>
+                {loading
+                  ? <span style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 8 }}><Spinner /> Ingesting...</span>
+                  : "▶ INGEST TICKET"}
+              </button>
+              <button onClick={() => setOpen(false)} style={{
+                padding: "12px 20px", background: COLORS.surface, color: COLORS.textDim,
+                border: `1px solid ${COLORS.border}`, borderRadius: 6,
+                fontSize: 13, cursor: "pointer", fontFamily: "inherit",
+              }}>Cancel</button>
+            </div>
+          </div>
+        </div>
+      )}
+    </>
+  );
+}
 
 // ── Main App Shell ────────────────────────────────────────────────────────────
 export default function App() {
-  const [screen, setScreen]   = useState("feed");
+  const [screen, setScreen] = useState("feed");
   const [selected, setSelected] = useState(null);
-  const [rcaData, setRcaData]   = useState(null);
-  const [apiOk, setApiOk]       = useState(null);
+  const [rcaData, setRcaData] = useState(null);
+  const [apiOk, setApiOk] = useState(null);
 
   useEffect(() => {
     const style = document.createElement("style");
@@ -939,10 +1184,10 @@ export default function App() {
   }
 
   const NAV = [
-    { id: "feed",     label: "01  LIVE FEED",    icon: "⬡" },
-    { id: "rca",      label: "02  RCA DETAIL",   icon: "⬡" },
-    { id: "approval", label: "03  APPROVAL",     icon: "⬡" },
-    { id: "audit",    label: "04  AUDIT TRAIL",  icon: "⬡" },
+    { id: "feed", label: "01  LIVE FEED", icon: "⬡" },
+    { id: "rca", label: "02  RCA DETAIL", icon: "⬡" },
+    { id: "approval", label: "03  APPROVAL", icon: "⬡" },
+    { id: "audit", label: "04  AUDIT TRAIL", icon: "⬡" },
   ];
 
   return (
@@ -958,9 +1203,11 @@ export default function App() {
             <span style={{ color: COLORS.accent }}>TAME</span>
             <span style={{ color: COLORS.textDim }}>PND</span>
           </div>
-          <div className="mono" style={{ fontSize: 9, color: COLORS.textDim,
+          <div className="mono" style={{
+            fontSize: 9, color: COLORS.textDim,
             letterSpacing: "0.12em", padding: "3px 8px", border: `1px solid ${COLORS.border}`,
-            borderRadius: 3 }}>
+            borderRadius: 3
+          }}>
             HUMAN-GOVERNED AIOPS
           </div>
         </div>
@@ -986,7 +1233,8 @@ export default function App() {
       </div>
 
       {/* Main content */}
-      <div style={{ flex: 1, overflow: "hidden", display: "grid",
+      <div style={{
+        flex: 1, overflow: "hidden", display: "grid",
         gridTemplateColumns: screen === "feed" ? "1fr 1fr" : "1fr",
         gridTemplateRows: "1fr",
       }}>
@@ -1026,6 +1274,7 @@ export default function App() {
           {new Date().toLocaleTimeString()}
         </div>
       </div>
+      <IngestForm onIngested={() => { }} />
     </div>
   );
 }
