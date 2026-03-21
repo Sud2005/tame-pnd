@@ -1,215 +1,259 @@
 """
-Phase 1 — Dataset Normalizer
-==============================
-Converts raw CSV (Kaggle OR synthetic) into your system's clean ticket schema.
-Handles messy column names, missing values, and priority format differences.
+Phase 2 — ITSM Dataset Normalizer (Updated)
+=============================================
+Built specifically for the actual ITSM_data.csv columns:
+  CI_Name, CI_Cat, CI_Subcat, WBS, Incident_ID, Status,
+  Impact, Urgency, Priority, Category, Alert_Status,
+  No_of_Reassignments, Open_Time, Handle_Time_hrs,
+  Closure_Code, No_of_Related_Interactions, etc.
 
 Usage:
-    python scripts/normalize_dataset.py --input data/tickets_raw.csv --output data/tickets_clean.csv
-    python scripts/normalize_dataset.py --input data/kaggle_itsm.csv --output data/tickets_clean.csv
+    python normalize_dataset.py --input ITSM_data.csv --output data/tickets_clean.csv
 """
 
 import argparse
-import json
 import csv
 import sys
 from datetime import datetime
+from collections import Counter
 
-
-# ─── Priority / Severity mapping (covers all known Kaggle formats) ──────────
+# ── Priority map — handles numeric 1-5 from ITSM_data.csv ──────────────────
 
 PRIORITY_MAP = {
-    # Numeric
-    "1": "P1", "2": "P2", "3": "P3", "4": "P3",
-    # Text (ServiceNow Kaggle dataset)
-    "critical": "P1", "high": "P2", "medium": "P3", "low": "P3",
-    # With "priority" prefix
-    "priority 1": "P1", "priority 2": "P2", "priority 3": "P3",
-    # Other formats
-    "p1": "P1", "p2": "P2", "p3": "P3",
-    "urgent": "P1", "normal": "P3",
+    "1":"P1","2":"P2","3":"P3","4":"P3","5":"P3",
+    "p1":"P1","p2":"P2","p3":"P3",
+    "critical":"P1","high":"P2","medium":"P3","low":"P3",
+    "1.0":"P1","2.0":"P2","3.0":"P3","4.0":"P3",
 }
 
-# ─── Column name aliases (maps Kaggle column names → your schema) ────────────
+# ── Exact column mapping for ITSM_data.csv ──────────────────────────────────
+# Key = our schema field, Values = possible column names in dataset
 
 COLUMN_ALIASES = {
-    "description":        ["short_description", "description", "incident_description",
-                           "summary", "title", "issue_description", "ci_name"],
-    "category":           ["category", "incident_type", "type", "service_category",
-                           "assignment_group_category"],
-    "priority":           ["priority", "severity", "impact", "urgency", "sla_priority"],
-    "opened_at":          ["opened_at", "created_at", "open_time", "incident_date",
-                           "date_opened", "created_date", "timestamp"],
-    "resolved_at":        ["resolved_at", "closed_at", "resolution_date", "close_time",
-                           "date_closed", "resolved_date"],
-    "resolution_notes":   ["close_notes", "resolution_notes", "resolution",
-                           "resolution_description", "fix_description", "close_code", "closure_code"],
-    "assigned_group":     ["assigned_group", "assignment_group", "team", "support_group",
-                           "resolver_group"],
-    "resolved_by":        ["resolved_by", "closed_by", "resolver", "technician",
-                           "assigned_to"],
-    "incident_id":        ["incident_id", "number", "id", "ticket_id", "sys_id",
-                           "case_number"],
+    "incident_id":      ["Incident_ID","incident_id","number","id","ticket_id"],
+    "description":      ["CI_Name","short_description","description","summary","title"],
+    "ci_cat":           ["CI_Cat","ci_cat","category_type"],
+    "ci_subcat":        ["CI_Subcat","ci_subcat","subcategory"],
+    "wbs":              ["WBS","wbs","work_breakdown"],
+    "priority":         ["Priority","priority","severity","Impact","impact","Urgency","urgency"],
+    "urgency":          ["Urgency","urgency"],
+    "impact":           ["Impact","impact"],
+    "category":         ["Category","category","incident_type"],
+    "alert_status":     ["Alert_Status","alert_status"],
+    "no_reassignments": ["No_of_Reassignments","reassignments"],
+    "opened_at":        ["Open_Time","opened_at","created_at","open_time","date_opened"],
+    "resolved_at":      ["Resolved_Time","resolved_at","close_time","Close_Time"],
+    "handle_time_hrs":  ["Handle_Time_hrs","handle_time","resolution_time_hrs"],
+    "closure_code":     ["Closure_Code","closure_code","close_notes","resolution_notes"],
+    "status":           ["Status","status"],
+    "related_incidents":["No_of_Related_Incidents","related_incidents"],
+    "related_changes":  ["No_of_Related_Changes","related_changes"],
+    "kb_number":        ["KB_number","kb_number","knowledge_article"],
 }
 
 
-def detect_column(df_columns, field_name):
-    """Find which actual column name corresponds to a schema field."""
-    df_cols_lower = {c.lower().strip(): c for c in df_columns}
-    for alias in COLUMN_ALIASES.get(field_name, []):
-        if alias.lower() in df_cols_lower:
-            return df_cols_lower[alias.lower()]
+def detect_column(all_cols, field):
+    lowmap = {c.lower().strip(): c for c in all_cols}
+    for alias in COLUMN_ALIASES.get(field, []):
+        if alias.lower() in lowmap:
+            return lowmap[alias.lower()]
     return None
 
 
-def parse_datetime(value):
-    formats = [
-        "%Y-%m-%d %H:%M:%S",
-        "%Y-%m-%dT%H:%M:%S",
-        "%d/%m/%Y %H:%M",
-        "%m/%d/%Y %H:%M:%S",
-        "%Y-%m-%d",
-        "%d-%m-%Y",
+def parse_datetime(val):
+    fmts = [
+        "%d/%m/%Y %H:%M","%m/%d/%Y %H:%M",
+        "%Y-%m-%d %H:%M:%S","%Y-%m-%dT%H:%M:%S",
+        "%d-%m-%Y %H:%M","%Y-%m-%d",
+        "%d/%m/%Y","%m/%d/%Y",
     ]
-    for fmt in formats:
+    val = str(val).strip()
+    for fmt in fmts:
         try:
-            return datetime.strptime(str(value).strip(), fmt)
+            return datetime.strptime(val, fmt)
         except ValueError:
             continue
     return None
 
 
-def calculate_mttr(opened_str, resolved_str):
-    opened = parse_datetime(opened_str)
-    resolved = parse_datetime(resolved_str)
-    if opened and resolved and resolved > opened:
-        delta = resolved - opened
-        return round(float(delta.total_seconds() / 3600.0), 2)  # type: ignore
+def calculate_mttr(opened, resolved):
+    o = parse_datetime(opened)
+    r = parse_datetime(resolved)
+    if o and r and r > o:
+        return round((r - o).total_seconds() / 3600, 2)
     return None
 
 
+def infer_description(row, col_map, all_cols):
+    """
+    ITSM_data.csv uses CI_Name as the identifier, not a text description.
+    We synthesize a meaningful description from available fields.
+    """
+    ci_name   = _get(row, col_map, "description", "")     # CI_Name
+    ci_cat    = _get(row, col_map, "ci_cat", "")          # CI_Cat
+    ci_subcat = _get(row, col_map, "ci_subcat", "")       # CI_Subcat
+    category  = _get(row, col_map, "category", "")        # Category
+    alert     = _get(row, col_map, "alert_status", "")    # Alert_Status
+    urgency   = _get(row, col_map, "urgency", "")
+    impact    = _get(row, col_map, "impact", "")
+
+    parts = []
+    if ci_subcat and ci_subcat.lower() not in ("nan","none",""):
+        parts.append(f"Incident with {ci_subcat}")
+    elif ci_cat and ci_cat.lower() not in ("nan","none",""):
+        parts.append(f"Incident with {ci_cat} component")
+    else:
+        parts.append("System incident")
+
+    if ci_name and ci_name.lower() not in ("nan","none",""):
+        parts.append(f"on {ci_name}")
+
+    if alert.lower() == "true":
+        parts.append("— active alert triggered")
+
+    if urgency in ("1","2","1.0","2.0"):
+        parts.append("with high urgency")
+
+    if impact in ("1","2","1.0","2.0"):
+        parts.append("with broad user impact")
+
+    if category and category.lower() not in ("nan","none","incident",""):
+        parts.append(f"[{category}]")
+
+    return " ".join(parts) if parts else "No description available"
+
+
+def _get(row, col_map, field, default=""):
+    col = col_map.get(field)
+    if col and col in row:
+        v = str(row[col]).strip()
+        return v if v.lower() not in ("nan","none","") else default
+    return default
+
+
 def normalize_row(row, col_map, row_num):
-    """Convert one raw CSV row into clean ticket schema."""
+    raw_priority = _get(row, col_map, "priority", "3")
+    severity     = PRIORITY_MAP.get(raw_priority.lower(), "P3")
 
-    def get(field, default=""):
-        col = col_map.get(field)
-        if col and col in row:
-            return str(row[col]).strip()
-        return default
+    raw_id  = _get(row, col_map, "incident_id", "")
+    tid     = raw_id if raw_id else f"INC{str(row_num).zfill(7)}"
 
-    raw_priority = get("priority", "P3").lower().strip()
-    severity = PRIORITY_MAP.get(raw_priority, "P3")
+    description = infer_description(row, col_map, row.keys())
 
-    raw_id = get("incident_id", "").strip()
-    ticket_id = raw_id if raw_id else f"INC{str(row_num).zfill(7)}"
+    opened_str   = _get(row, col_map, "opened_at", "")
+    resolved_str = _get(row, col_map, "resolved_at", "")
 
-    description = get("description", "No description provided")
-    if not description or description.lower() in ("nan", "none", ""):
-        description = "No description provided"
+    # Use Handle_Time_hrs directly from dataset if available
+    handle_time = _get(row, col_map, "handle_time_hrs", "")
+    try:
+        mttr = float(handle_time) if handle_time else calculate_mttr(opened_str, resolved_str)
+    except ValueError:
+        mttr = calculate_mttr(opened_str, resolved_str)
 
-    resolution = get("resolution_notes", "")
-    if resolution.lower() in ("nan", "none", ""):
-        resolution = ""
+    closure_code = _get(row, col_map, "closure_code", "")
+    raw_status   = _get(row, col_map, "status", "").lower()
 
-    category = get("category", "General")
-    if category.lower() in ("nan", "none", ""):
-        category = "General"
+    # Map ITSM status values
+    if raw_status in ("closed","resolved","completed"):
+        status = "resolved"
+    elif raw_status in ("open","new","in progress","active"):
+        status = "open"
+    else:
+        status = "resolved" if closure_code else "open"
 
-    opened_str = get("opened_at")
-    resolved_str = get("resolved_at")
-    mttr = calculate_mttr(opened_str, resolved_str)
-
-    # Status: resolved only if there are resolution notes
-    status = "resolved" if resolution else "open"
+    # Derive category from CI_Cat if possible
+    ci_cat = _get(row, col_map, "ci_cat", "")
+    ci_cat_to_category = {
+        "storage": "Database", "database": "Database",
+        "network": "Network", "networkcomponents": "Network",
+        "hardware": "Infrastructure", "displaydevice": "Infrastructure",
+        "application": "Application", "subapplication": "Application",
+        "applicationcomponent": "Application",
+    }
+    category = ci_cat_to_category.get(ci_cat.lower(), "General")
 
     return {
-        "id":                 ticket_id,
-        "description":        description,
-        "severity":           severity,
-        "category":           category,
-        "opened_at":          opened_str or datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "resolved_at":        resolved_str or "",
-        "resolution_time_hrs": mttr or "",
-        "resolution_notes":   resolution,
-        "assigned_group":     get("assigned_group", "SUPPORT-TEAM"),
-        "resolved_by":        get("resolved_by", "unknown"),
-        "status":             status,
+        "id":                   tid,
+        "description":          description,
+        "severity":             severity,
+        "category":             category,
+        "ci_cat":               ci_cat,
+        "ci_subcat":            _get(row, col_map, "ci_subcat", ""),
+        "urgency":              _get(row, col_map, "urgency", ""),
+        "impact":               _get(row, col_map, "impact", ""),
+        "alert_status":         _get(row, col_map, "alert_status", "False"),
+        "no_reassignments":     _get(row, col_map, "no_reassignments", "0"),
+        "opened_at":            opened_str or datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "resolved_at":          resolved_str,
+        "resolution_time_hrs":  mttr or "",
+        "resolution_notes":     closure_code,
+        "kb_number":            _get(row, col_map, "kb_number", ""),
+        "related_incidents":    _get(row, col_map, "related_incidents", "0"),
+        "status":               status,
     }
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Normalize ITSM dataset to clean schema")
-    parser.add_argument("--input",  required=True,  help="Path to raw CSV file")
-    parser.add_argument("--output", required=True,  help="Path for cleaned CSV output")
-    parser.add_argument("--limit",  type=int, default=None, help="Max rows to process")
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--input",  required=True)
+    parser.add_argument("--output", required=True)
+    parser.add_argument("--limit",  type=int, default=None)
     args = parser.parse_args()
 
     print(f"\n📂 Reading: {args.input}")
-
     with open(args.input, newline="", encoding="utf-8-sig") as f:
-        reader = csv.DictReader(f)
+        reader   = csv.DictReader(f)
         raw_rows = list(reader)
-        raw_columns = reader.fieldnames or []
+        raw_cols = reader.fieldnames or []
 
-    print(f"   Found {len(raw_rows)} rows, {len(raw_columns)} columns")
-    print(f"   Columns: {raw_columns[:8]}{'...' if len(raw_columns) > 8 else ''}")  # type: ignore
+    print(f"   Rows: {len(raw_rows):,}  |  Columns: {len(raw_cols)}")
 
-    # Auto-detect column mapping
+    print(f"\n🔍 Column mapping:")
     col_map = {}
-    print(f"\n🔍 Detecting column mapping:")
     for field in COLUMN_ALIASES:
-        detected = detect_column(raw_columns, field)
+        detected = detect_column(raw_cols, field)
         col_map[field] = detected
-        status = f"✅ → '{detected}'" if detected else "⚠️  NOT FOUND (will use default)"
-        print(f"   {field:<20} {status}")
+        icon = "✅" if detected else "⚠️ "
+        print(f"   {icon} {field:<22} → {detected or 'NOT FOUND (default used)'}")
 
-    if not col_map.get("description"):
-        print("\n❌ Could not find a description column. Check your CSV column names.")
+    if not col_map.get("description") and not col_map.get("ci_cat"):
+        print("\n❌ Cannot find key columns. Check your CSV.")
         sys.exit(1)
 
-    # Normalize
-    rows_to_process = raw_rows[:args.limit] if args.limit else raw_rows  # type: ignore
-    cleaned = []
-    skipped: int = 0
+    to_process = raw_rows[:args.limit] if args.limit else raw_rows
+    cleaned, skipped = [], 0
 
-    for i, row in enumerate(rows_to_process):
+    for i, row in enumerate(to_process):
         try:
-            cleaned_row = normalize_row(row, col_map, i + 1)
-            cleaned.append(cleaned_row)
+            cleaned.append(normalize_row(row, col_map, i+1))
         except Exception as e:
-            skipped += 1  # type: ignore
+            skipped += 1
             if skipped <= 3:
-                print(f"   ⚠️  Skipped row {i+1}: {e}")
+                print(f"   ⚠️  Row {i+1}: {e}")
 
-    # Write output
     if not cleaned:
-        print("❌ No rows were successfully normalized.")
+        print("❌ No rows normalized.")
         sys.exit(1)
 
-    fieldnames = list(cleaned[0].keys())
     with open(args.output, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer = csv.DictWriter(f, fieldnames=list(cleaned[0].keys()))
         writer.writeheader()
         writer.writerows(cleaned)
 
-    # Stats
-    from collections import Counter
     sev_counts = Counter(r["severity"] for r in cleaned)
     cat_counts  = Counter(r["category"] for r in cleaned)
-    resolved_count = sum(1 for r in cleaned if r["status"] == "resolved")
+    resolved    = sum(1 for r in cleaned if r["status"] == "resolved")
+    alerted     = sum(1 for r in cleaned if r["alert_status"].lower() == "true")
 
-    print(f"\n✅ Normalized {len(cleaned)} rows → {args.output}")
-    if skipped:
-        print(f"   ⚠️  Skipped {skipped} malformed rows")
-    print(f"\n   Severity:  {dict(sev_counts)}")
-    print(f"   Resolved:  {resolved_count} / {len(cleaned)}")
-    print(f"\n   Top categories:")
-    for cat, count in cat_counts.most_common(5):
-        print(f"     {cat}: {count}")
+    print(f"\n✅ Normalized {len(cleaned):,} rows → {args.output}")
+    if skipped: print(f"   ⚠️  Skipped: {skipped}")
+    print(f"\n   Severity: {dict(sev_counts)}")
+    print(f"   Resolved: {resolved:,} / {len(cleaned):,}")
+    print(f"   Active alerts: {alerted:,}")
+    print(f"\n   Top categories: {dict(cat_counts.most_common(4))}")
     print(f"\n   Sample row:")
-    sample = cleaned[0]
-    for k, v in sample.items():
-        print(f"     {k}: {str(v)[:60]}")  # type: ignore
+    for k, v in list(cleaned[0].items())[:8]:
+        print(f"     {k}: {str(v)[:55]}")
 
 
 if __name__ == "__main__":
