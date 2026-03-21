@@ -200,11 +200,11 @@ def seed_tickets_from_csv(conn, csv_path):
                     row["id"],
                     row["description"],
                     row["severity"],
-                    row["category"],
+                    row.get("category"),
                     row.get("opened_at", ""),
                     row.get("resolved_at", ""),
                     row.get("resolution_time_hrs") or None,
-                    row.get("resolution_notes", ""),
+                    row.get("resolution_notes") or row.get("Closure_Code") or row.get("closure_code") or "",
                     row.get("assigned_group", "SUPPORT-TEAM"),
                     row.get("resolved_by", "unknown"),
                     row.get("status", "resolved"),
@@ -262,9 +262,15 @@ def main():
     import os
     os.makedirs("db", exist_ok=True)
 
-    if args.reset and os.path.exists(args.db):
-        os.remove(args.db)
-        print("🗑️  Dropped existing database")
+    if args.reset:
+        if os.path.exists(args.db):
+            os.remove(args.db)
+            print("🗑️  Dropped existing database")
+        if os.path.exists("db/faiss.index"):
+            os.remove("db/faiss.index")
+        if os.path.exists("db/memory_store.pkl"):
+            os.remove("db/memory_store.pkl")
+            print("🗑️  Dropped existing FAISS memory index")
 
     conn = sqlite3.connect(args.db)
     conn.row_factory = sqlite3.Row

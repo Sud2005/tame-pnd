@@ -202,7 +202,7 @@ function TicketFeed({ onSelectTicket, selected }) {
   const statCards = [
     { label: "TOTAL", val: stats.total_tickets || 0, color: COLORS.accent },
     { label: "OPEN", val: stats.open_tickets || 0, color: COLORS.p2 },
-    { label: "P1 OPEN", val: stats.p1_open || 0, color: COLORS.p1 },
+    { label: "P1 UNRESOLVED", val: stats.p1_open || 0, color: COLORS.p1 },
     { label: "PENDING", val: stats.pending_approval || 0, color: COLORS.p2 },
     { label: "RESOLVED", val: stats.resolved || 0, color: COLORS.p3 },
     { label: "RCA DONE", val: stats.rca_completed || 0, color: COLORS.accent },

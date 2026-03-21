@@ -455,7 +455,7 @@ def get_stats():
        "open_tickets":conn.execute("SELECT COUNT(*) FROM tickets WHERE status='open'").fetchone()[0],
        "pending_approval":conn.execute("SELECT COUNT(*) FROM tickets WHERE status='pending_approval'").fetchone()[0],
        "resolved":conn.execute("SELECT COUNT(*) FROM tickets WHERE status='resolved'").fetchone()[0],
-       "p1_open":conn.execute("SELECT COUNT(*) FROM tickets WHERE severity='P1' AND status='open'").fetchone()[0],
+       "p1_open":conn.execute("SELECT COUNT(*) FROM tickets WHERE severity='P1' AND status IN ('open', 'pending_approval')").fetchone()[0],
        "predictions_run":conn.execute("SELECT COUNT(*) FROM predictions").fetchone()[0],
        "rca_completed":conn.execute("SELECT COUNT(*) FROM rca_results").fetchone()[0],
        "audit_events":conn.execute("SELECT COUNT(*) FROM audit_log").fetchone()[0],
