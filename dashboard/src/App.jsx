@@ -178,8 +178,9 @@ function TicketFeed({ onSelectTicket, selected }) {
   const prevIds = useRef(new Set());
 
   const load = useCallback(async () => {
+    const severityParam = filter !== "all" ? `&severity=${filter}` : "";
     const [t, s] = await Promise.all([
-      apiFetch("/tickets?limit=50"),
+      apiFetch(`/tickets?limit=50&exclude_resolved=true${severityParam}`),
       apiFetch("/stats"),
     ]);
     if (t?.tickets) {
@@ -195,9 +196,13 @@ function TicketFeed({ onSelectTicket, selected }) {
     setLoading(false);
   }, []);
 
-  useEffect(() => { load(); const i = setInterval(load, 5000); return () => clearInterval(i); }, [load]);
+  useEffect(() => {
+    load();
+    const i = setInterval(load, 5000);
+    return () => clearInterval(i);
+  }, [load, filter]);
 
-  const visible = filter === "all" ? tickets : tickets.filter(t => t.severity === filter);
+  const visible = tickets;  // filtering is now done server-side in the fetch URL
 
   const statCards = [
     { label: "TOTAL", val: stats.total_tickets || 0, color: COLORS.accent },
@@ -578,8 +583,8 @@ function ApprovalWorkflow({ ticket, rca, onComplete }) {
     const fixType = inferFixType(rca?.recommended_fix);
     const actionType = action === "auto" ? "AUTO"
       : action === "reject" ? "REJECT"
-      : action === "senior_approve" ? "APPROVE"
-      : "APPROVE";
+        : action === "senior_approve" ? "APPROVE"
+          : "APPROVE";
 
     // Call the real execute endpoint — writes to approval_actions + executions
     const data = await apiFetch(`/tickets/${ticket.id}/execute`, {
@@ -685,11 +690,21 @@ function ApprovalWorkflow({ ticket, rca, onComplete }) {
               fontFamily: "inherit", fontSize: 13, fontWeight: 700,
             }}>⟲ ROLLBACK</button>
           )}
-          <button onClick={() => setResult(null)} style={{
-            padding: "10px 24px", background: COLORS.border, color: COLORS.text,
-            border: "none", borderRadius: 6, cursor: "pointer", fontFamily: "inherit",
-            fontSize: 13, fontWeight: 600,
-          }}>← Back</button>
+          <div style={{ display: "flex", gap: 10 }}>
+            <button onClick={() => setResult(null)} style={{
+              padding: "10px 24px", background: COLORS.border, color: COLORS.text,
+              border: "none", borderRadius: 6, cursor: "pointer", fontFamily: "inherit",
+              fontSize: 13, fontWeight: 600,
+            }}>← Back</button>
+            <button onClick={() => {
+              // manually switch to audit — user chooses when they're ready
+              if (window.__setScreen) window.__setScreen("audit");
+            }} style={{
+              padding: "10px 24px", background: COLORS.accent, color: COLORS.bg,
+              border: "none", borderRadius: 6, cursor: "pointer", fontFamily: "inherit",
+              fontSize: 13, fontWeight: 700,
+            }}>View Audit Trail →</button>
+          </div>
         </div>
       </div>
     );
@@ -1198,6 +1213,7 @@ function IngestForm({ onIngested }) {
 // ── Main App Shell ────────────────────────────────────────────────────────────
 export default function App() {
   const [screen, setScreen] = useState("feed");
+  useEffect(() => { window.__setScreen = setScreen; }, [setScreen]);
   const [selected, setSelected] = useState(null);
   const [rcaData, setRcaData] = useState(null);
   const [apiOk, setApiOk] = useState(null);
@@ -1295,7 +1311,7 @@ export default function App() {
         )}
         {screen === "approval" && (
           <ApprovalWorkflow ticket={selected} rca={rcaData}
-            onComplete={() => setTimeout(() => setScreen("audit"), 2000)} />
+            onComplete={() => setTimeout(() => setScreen("audit"), 6000)} />
         )}
         {screen === "audit" && <AuditTrail />}
       </div>

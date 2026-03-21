@@ -421,7 +421,7 @@ def list_tickets(status: Optional[str]=None, severity: Optional[str]=None, limit
     conn=get_db(); q="SELECT * FROM tickets WHERE 1=1"; params=[]
     if status: q+=" AND status=?"; params.append(status)
     if severity: q+=" AND severity=?"; params.append(severity.upper())
-    q+=" ORDER BY opened_at DESC LIMIT ? OFFSET ?"; params+=[limit,offset]
+    q+=" ORDER BY created_at DESC LIMIT ? OFFSET ?"; params+=[limit,offset]
     rows=conn.execute(q,params).fetchall()
     total=conn.execute("SELECT COUNT(*) FROM tickets").fetchone()[0]
     conn.close()
