@@ -160,6 +160,9 @@ FIX_TYPES = [
     ("Application",     "rollback_deployment",       31, 1, 0),
     ("Application",     "restart_app_service",       48, 4, 1),
     ("Application",     "update_config",             36, 3, 0),
+    ("General", "escalate_to_engineer",  20, 2, 0),
+    ("General", "restart_service",       15, 3, 1),
+    ("General", "investigate_logs",      25, 1, 0),
 ]
 
 

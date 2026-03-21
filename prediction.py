@@ -223,13 +223,15 @@ def parse_response(raw: str) -> dict:
 
 # ── Trust calibration: adjusts raw LLM confidence with outcome history ────────
 
-def calibrate_confidence(raw: int, category: str, severity: str, conn) -> int:
+def calibrate_confidence(raw: int, category: str, severity: str, conn,
+                         has_rich_description: bool = False) -> int:
     """
     Adjusts confidence using historical fix outcome data from DB.
-    Low history  → deflate to 55 max (force human review)
+    Rich descriptions (manual/preset) → trust Groq more (0.85×)
+    Weak descriptions (ITSM CSV IDs)  → deflate more (0.70×)
     Good history → blend LLM score with historical accuracy
-    Rollbacks    → penalise heavily (-10 per rollback)
-    P1           → always cap at 80 (human always involved)
+    Rollbacks → penalise heavily (-10 per rollback)
+    P1 → always cap at 80 (human always involved)
     """
     rows = conn.execute("""
         SELECT approve_count, reject_count, rollback_count, total_actions
@@ -239,8 +241,13 @@ def calibrate_confidence(raw: int, category: str, severity: str, conn) -> int:
     total_history = sum(r[3] for r in rows) if rows else 0
 
     if total_history < 5:
-        # Not enough data — be humble, force human review
-        return min(raw, 55)
+        # Scale deflation by description quality
+        # Rich descriptions (manual/preset) → Groq had real signal, trust it
+        # Weak descriptions (ITSM CSV device IDs) → Groq guessed, deflate more
+        factor = 0.85 if has_rich_description else 0.70
+        deflated = int(raw * factor)
+        if severity == "P1": return min(deflated, 80)
+        return max(35, deflated)  # Floor at 35 — never go absurdly low
 
     total_approvals = sum(r[0] for r in rows)
     total_actions   = sum(r[3] for r in rows)
@@ -336,6 +343,12 @@ def predict_ticket(
     # ── Layer 1: Keyword analysis (always runs, no API) ───────────────────────
     kw_analysis = run_keyword_analysis(description, ci_cat, alert_status)
 
+    # Determine if description is "rich" (manual/preset with real English text)
+    # vs "weak" (ITSM CSV device IDs like "WBA000058")
+    # Rich descriptions have >40 chars and contain spaces between words
+    word_count = len(description.split())
+    has_rich_desc = len(description) > 40 and word_count > 5
+
     result = None
 
     try:
@@ -371,9 +384,24 @@ def predict_ticket(
             final_sev = kw_sev
             parsed["reasoning"] += f" (escalated by keyword: {kw_analysis['flags'][0]})"
 
+        # Also use urgency/impact signals to override weak Groq classification
+        if urgency in ("1", "1.0") and impact in ("1", "1.0") and final_sev != "P1":
+            final_sev = "P1"
+            parsed["reasoning"] += " (escalated: urgency=1 + impact=1)"
+        elif urgency in ("1", "2", "1.0", "2.0") and final_sev == "P3":
+            final_sev = "P2"
+            parsed["reasoning"] += f" (escalated: urgency={urgency})"
+
+        # Recalculate risk_tier to match final severity
+        if final_sev == "P1":
+            parsed["risk_tier"] = "Critical"
+        elif final_sev == "P2" and parsed["risk_tier"] == "Low":
+            parsed["risk_tier"] = "Medium"
+
         # ── Layer 3: Trust calibration ─────────────────────────────────────────
         calibrated = calibrate_confidence(
-            parsed["confidence_score"], parsed["category"], final_sev, conn
+            parsed["confidence_score"], parsed["category"], final_sev, conn,
+            has_rich_description=has_rich_desc
         )
 
         # ── Layer 4: Approval path ─────────────────────────────────────────────

@@ -85,42 +85,41 @@ def calculate_mttr(opened, resolved):
 
 
 def infer_description(row, col_map, all_cols):
-    """
-    ITSM_data.csv uses CI_Name as the identifier, not a text description.
-    We synthesize a meaningful description from available fields.
-    """
-    ci_name   = _get(row, col_map, "description", "")     # CI_Name
-    ci_cat    = _get(row, col_map, "ci_cat", "")          # CI_Cat
-    ci_subcat = _get(row, col_map, "ci_subcat", "")       # CI_Subcat
-    category  = _get(row, col_map, "category", "")        # Category
-    alert     = _get(row, col_map, "alert_status", "")    # Alert_Status
+   ci_name   = _get(row, col_map, "description", "")
+    ci_cat    = _get(row, col_map, "ci_cat", "")
+    ci_subcat = _get(row, col_map, "ci_subcat", "")
     urgency   = _get(row, col_map, "urgency", "")
     impact    = _get(row, col_map, "impact", "")
+    alert     = _get(row, col_map, "alert_status", "")
+    no_reassign = _get(row, col_map, "no_reassignments", "0")
 
+    # Build a meaningful description instead of just "Incident with X on Y"
     parts = []
-    if ci_subcat and ci_subcat.lower() not in ("nan","none",""):
-        parts.append(f"Incident with {ci_subcat}")
-    elif ci_cat and ci_cat.lower() not in ("nan","none",""):
-        parts.append(f"Incident with {ci_cat} component")
-    else:
-        parts.append("System incident")
 
-    if ci_name and ci_name.lower() not in ("nan","none",""):
-        parts.append(f"on {ci_name}")
+    subcat_map = {
+        "Desktop Application": "Desktop application issue",
+        "Web Based Application": "Web application failure",
+        "Server Based Application": "Server application error",
+        "Network Infrastructure": "Network connectivity issue",
+        "SAN Storage": "Storage system failure",
+        "Laptop": "Laptop hardware issue",
+    }
+    base = subcat_map.get(ci_subcat, f"{ci_subcat or ci_cat or 'System'} incident")
+    parts.append(base)
 
-    if alert.lower() == "true":
-        parts.append("— active alert triggered")
+    if ci_name and ci_name not in ("nan", "none", ""):
+        parts.append(f"on device {ci_name}")
 
-    if urgency in ("1","2","1.0","2.0"):
+    if urgency in ("1", "2", "1.0", "2.0"):
         parts.append("with high urgency")
+    if impact in ("1", "2", "1.0", "2.0"):
+        parts.append("affecting multiple users")
+    if alert.lower() == "true":
+        parts.append("— active monitoring alert triggered")
+    if no_reassign and int(float(no_reassign)) > 2:
+        parts.append(f"— reassigned {no_reassign} times indicating complexity")
 
-    if impact in ("1","2","1.0","2.0"):
-        parts.append("with broad user impact")
-
-    if category and category.lower() not in ("nan","none","incident",""):
-        parts.append(f"[{category}]")
-
-    return " ".join(parts) if parts else "No description available"
+    return ". ".join(parts)
 
 
 def _get(row, col_map, field, default=""):

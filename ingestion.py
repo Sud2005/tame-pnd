@@ -93,6 +93,15 @@ class ResolveRequest(BaseModel):
     resolution_notes: str = Field(..., min_length=5)
     resolved_by:      Optional[str] = "operator"
 
+class ExecuteRequest(BaseModel):
+    fix_type:         str = Field(..., description="restart_service|clear_cache|scale_up|rollback_config")
+    approval_path:    str = Field(..., description="A|B|C")
+    action_type:      str = Field(default="APPROVE", description="APPROVE|REJECT|OVERRIDE|AUTO")
+    operator_id:      str = Field(default="operator")
+    operator_reason:  Optional[str] = None
+    confidence:       Optional[int] = None
+    risk_tier:        Optional[str] = None
+
 
 P1_KW  = ["production down","all users","data loss","complete outage","critical failure",
            "unresponsive","breach","all services","entire system","site down"]
@@ -222,6 +231,181 @@ def resolve_ticket(ticket_id: str, body: ResolveRequest):
         except Exception as e: print(f"⚠️  FAISS add failed: {e}")
     conn.close()
     return {"message": f"{ticket_id} resolved", "memory_updated": RCA_ENABLED}
+
+
+# ── Remediation simulations ──────────────────────────────────────────────────
+import time as _time
+
+def _simulate_fix(fix_type: str, ticket: dict) -> dict:
+    """Simulate executing a remediation action. Returns pre/post state."""
+    pre_state = {
+        "ticket_id": ticket["id"],
+        "status": ticket["status"],
+        "severity": ticket["severity"],
+        "timestamp": datetime.now().isoformat(),
+    }
+    # Simulate work (real system would SSH/API call here)
+    _time.sleep(0.5)
+    post_state = {
+        "ticket_id": ticket["id"],
+        "status": "resolved",
+        "fix_applied": fix_type,
+        "outcome": "success",
+        "timestamp": datetime.now().isoformat(),
+    }
+    return pre_state, post_state
+
+
+@app.post("/tickets/{ticket_id}/execute")
+def execute_fix(ticket_id: str, body: ExecuteRequest, bg: BackgroundTasks):
+    """Full governance execution: approval → simulate fix → resolve → learn."""
+    conn = get_db()
+    row = conn.execute("SELECT * FROM tickets WHERE id=?", (ticket_id,)).fetchone()
+    if not row:
+        conn.close()
+        raise HTTPException(404, f"Ticket {ticket_id} not found")
+    ticket = dict(row)
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    # 1. Write to approval_actions
+    approval_id = str(uuid.uuid4())
+    rca_row = conn.execute(
+        "SELECT id FROM rca_results WHERE ticket_id=? ORDER BY created_at DESC LIMIT 1",
+        (ticket_id,)
+    ).fetchone()
+    conn.execute("""
+        INSERT INTO approval_actions
+        (id, ticket_id, rca_id, approval_path, action_type, operator_id,
+         operator_reason, recommended_fix, confidence_at_time, risk_tier, created_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?)
+    """, (
+        approval_id, ticket_id,
+        rca_row["id"] if rca_row else None,
+        body.approval_path, body.action_type, body.operator_id,
+        body.operator_reason or "",
+        body.fix_type, body.confidence, body.risk_tier, now,
+    ))
+
+    # 2. Simulate remediation
+    pre_state, post_state = _simulate_fix(body.fix_type, ticket)
+
+    # 3. Write to executions
+    exec_id = str(uuid.uuid4())
+    conn.execute("""
+        INSERT INTO executions
+        (id, approval_id, ticket_id, fix_type, pre_state, post_state,
+         outcome, rolled_back, executed_at)
+        VALUES (?,?,?,?,?,?,?,?,?)
+    """, (
+        exec_id, approval_id, ticket_id, body.fix_type,
+        json.dumps(pre_state), json.dumps(post_state),
+        "success", 0, now,
+    ))
+
+    # 4. Update fix_outcomes trust calibration
+    if body.action_type in ("APPROVE", "AUTO"):
+        conn.execute("""
+            UPDATE fix_outcomes SET approve_count = approve_count + 1,
+            total_actions = total_actions + 1, last_updated = ?
+            WHERE category = ? AND fix_type = ?
+        """, (now, ticket["category"], body.fix_type))
+    elif body.action_type == "REJECT":
+        conn.execute("""
+            UPDATE fix_outcomes SET reject_count = reject_count + 1,
+            total_actions = total_actions + 1, last_updated = ?
+            WHERE category = ? AND fix_type = ?
+        """, (now, ticket["category"], body.fix_type))
+
+    # 5. Resolve ticket
+    conn.execute(
+        "UPDATE tickets SET status='resolved', resolved_at=?, resolution_notes=?, resolved_by=? WHERE id=?",
+        (now, f"Fix: {body.fix_type}", body.operator_id, ticket_id)
+    )
+
+    # 6. Audit log
+    write_audit(conn, "EXECUTE", ticket_id,
+                operator_id=body.operator_id,
+                action_taken=f"{body.action_type} → {body.fix_type}",
+                confidence=body.confidence,
+                risk_tier=body.risk_tier,
+                reasoning=body.operator_reason or f"Executed {body.fix_type}",
+                outcome="success")
+    conn.commit()
+
+    # 7. Add to FAISS memory (learning loop)
+    if RCA_ENABLED:
+        resolved_ticket = dict(row)
+        resolved_ticket["resolution_notes"] = f"Fix: {body.fix_type}"
+        resolved_ticket["status"] = "resolved"
+        try:
+            add_to_index(resolved_ticket)
+        except Exception as e:
+            print(f"⚠️  FAISS add failed: {e}")
+    conn.close()
+
+    return {
+        "message": f"{ticket_id} executed and resolved",
+        "execution_id": exec_id,
+        "approval_id": approval_id,
+        "fix_type": body.fix_type,
+        "outcome": "success",
+        "memory_updated": RCA_ENABLED,
+        "rollback_url": f"/executions/{exec_id}/rollback",
+    }
+
+
+@app.post("/executions/{execution_id}/rollback")
+def rollback_execution(execution_id: str):
+    """Rollback a previous execution — restores pre-state, penalizes confidence."""
+    conn = get_db()
+    row = conn.execute("SELECT * FROM executions WHERE id=?", (execution_id,)).fetchone()
+    if not row:
+        conn.close()
+        raise HTTPException(404, f"Execution {execution_id} not found")
+    if row["rolled_back"]:
+        conn.close()
+        raise HTTPException(400, "Already rolled back")
+
+    exec_data = dict(row)
+    ticket_id = exec_data["ticket_id"]
+    fix_type  = exec_data["fix_type"]
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    # 1. Mark execution as rolled back
+    conn.execute(
+        "UPDATE executions SET rolled_back=1, rollback_reason='operator_initiated', rolled_back_at=? WHERE id=?",
+        (now, execution_id)
+    )
+
+    # 2. Reopen ticket
+    conn.execute(
+        "UPDATE tickets SET status='open', resolved_at=NULL, resolution_notes=NULL WHERE id=?",
+        (ticket_id,)
+    )
+
+    # 3. Penalize fix confidence in fix_outcomes
+    ticket_row = conn.execute("SELECT category FROM tickets WHERE id=?", (ticket_id,)).fetchone()
+    if ticket_row:
+        conn.execute("""
+            UPDATE fix_outcomes SET rollback_count = rollback_count + 1,
+            total_actions = total_actions + 1, last_updated = ?
+            WHERE category = ? AND fix_type = ?
+        """, (now, ticket_row["category"], fix_type))
+
+    # 4. Audit log
+    write_audit(conn, "ROLLBACK", ticket_id,
+                action_taken=f"Rolled back {fix_type}",
+                reasoning="Operator-initiated rollback",
+                outcome="rolled_back")
+    conn.commit()
+    conn.close()
+
+    return {
+        "message": f"Execution {execution_id} rolled back",
+        "ticket_id": ticket_id,
+        "ticket_status": "open",
+        "fix_penalized": True,
+    }
 
 
 @app.get("/tickets/{ticket_id}/prediction")

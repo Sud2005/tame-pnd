@@ -30,6 +30,11 @@ def post_ticket(ticket: dict) -> dict:
         "description":    ticket.get("description", ""),
         "severity":       ticket.get("severity") or None,
         "category":       ticket.get("category") or None,
+        "ci_cat":         ticket.get("ci_cat") or None,
+        "ci_subcat":      ticket.get("ci_subcat") or None,
+        "urgency":        ticket.get("urgency") or None,
+        "impact":         ticket.get("impact") or None,
+        "alert_status":   ticket.get("alert_status") or None,
         "assigned_group": ticket.get("assigned_group") or None,
         "source":         "csv_feed",
     }).encode("utf-8")
@@ -59,7 +64,7 @@ def check_api():
 
 
 def prepare_demo_tickets(csv_path: str, severity_filter=None) -> list:
-    """Load and strip resolution notes — system must figure it out fresh."""
+    """Load tickets with full ITSM context — prediction engine needs all fields."""
     tickets = []
     with open(csv_path, newline="", encoding="utf-8-sig") as f:
         reader = csv.DictReader(f)
@@ -73,10 +78,22 @@ def prepare_demo_tickets(csv_path: str, severity_filter=None) -> list:
                 
             desc = row.get("description") or row.get("short_description") or row.get("CI_Name") or "No description provided"
             
+            # Extract ITSM-specific fields — these give the prediction engine real signal
+            ci_cat     = row.get("ci_cat") or row.get("CI_Cat") or ""
+            ci_subcat  = row.get("ci_subcat") or row.get("CI_Subcat") or ""
+            urgency    = str(row.get("urgency") or row.get("Urgency") or "").strip()
+            impact     = str(row.get("impact") or row.get("Impact") or "").strip()
+            alert      = str(row.get("alert_status") or row.get("Alert_Status") or "").strip()
+
             tickets.append({
                 "description":    desc,
                 "severity":       priority if priority else None,
                 "category":       row.get("Category") or row.get("category") or None,
+                "ci_cat":         ci_cat if ci_cat.lower() not in ("nan", "none", "") else None,
+                "ci_subcat":      ci_subcat if ci_subcat.lower() not in ("nan", "none", "") else None,
+                "urgency":        urgency if urgency and urgency.lower() not in ("nan", "none") else None,
+                "impact":         impact if impact and impact.lower() not in ("nan", "none") else None,
+                "alert_status":   alert if alert.lower() not in ("nan", "none", "") else None,
                 "assigned_group": row.get("assigned_group") or row.get("Assignment_Group") or "",
             })
     return tickets

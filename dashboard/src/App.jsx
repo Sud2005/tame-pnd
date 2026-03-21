@@ -555,31 +555,58 @@ function ApprovalWorkflow({ ticket, rca, onComplete }) {
     : conf >= 85 && risk === "Low" ? "A" : "B";
   const riskColor = RISK_COLOR[risk] || COLORS.textDim;
 
+  // Map RCA recommended fix to a fix_type the backend understands
+  const FIX_TYPE_MAP = {
+    "restart": "restart_service",
+    "cache": "clear_cache",
+    "scale": "scale_up",
+    "rollback": "rollback_config",
+    "clear": "clear_cache",
+    "reboot": "restart_service",
+  };
+  function inferFixType(fix) {
+    if (!fix) return "restart_service";
+    const lower = fix.toLowerCase();
+    for (const [kw, ft] of Object.entries(FIX_TYPE_MAP)) {
+      if (lower.includes(kw)) return ft;
+    }
+    return "restart_service";
+  }
+
   async function executeAction(action) {
     setLoading(true);
-    // Simulate remediation execution (real endpoint would be /tickets/{id}/execute)
-    await new Promise(r => setTimeout(r, 2000));
+    const fixType = inferFixType(rca?.recommended_fix);
+    const actionType = action === "auto" ? "AUTO"
+      : action === "reject" ? "REJECT"
+      : action === "senior_approve" ? "APPROVE"
+      : "APPROVE";
+
+    // Call the real execute endpoint — writes to approval_actions + executions
+    const data = await apiFetch(`/tickets/${ticket.id}/execute`, {
+      method: "POST",
+      body: JSON.stringify({
+        fix_type: fixType,
+        approval_path: path,
+        action_type: actionType,
+        operator_id: action === "auto" ? "system" : "operator",
+        operator_reason: reason || rca?.recommended_fix || "Approved and executed",
+        confidence: conf,
+        risk_tier: risk,
+      }),
+    });
 
     const outcome = {
-      action,
+      action: actionType,
       ticket_id: ticket.id,
+      fix_type: fixType,
       fix_applied: rca?.recommended_fix || "Manual remediation",
       executed_by: action === "auto" ? "system" : "operator",
+      execution_id: data?.execution_id || null,
+      rollback_url: data?.rollback_url || null,
+      outcome: data?.outcome || "success",
+      memory_updated: data?.memory_updated || false,
       timestamp: new Date().toISOString(),
-      outcome: "success",
-      rollback_available: true,
     };
-
-    // Write to audit log via resolve endpoint if approving
-    if (action !== "reject") {
-      await apiFetch(`/tickets/${ticket.id}/resolve`, {
-        method: "POST",
-        body: JSON.stringify({
-          resolution_notes: rca?.recommended_fix || "Approved and executed",
-          resolved_by: action === "auto" ? "system" : "operator",
-        }),
-      });
-    }
 
     setResult(outcome);
     setLoading(false);
@@ -628,7 +655,7 @@ function ApprovalWorkflow({ ticket, rca, onComplete }) {
         </div>
         <Card style={{ padding: 24, width: "100%", maxWidth: 480, textAlign: "left" }}>
           <div className="mono" style={{ fontSize: 12, display: "flex", flexDirection: "column", gap: 8 }}>
-            {Object.entries(result).map(([k, v]) => (
+            {Object.entries(result).filter(([k]) => k !== "rollback_url").map(([k, v]) => (
               <div key={k} style={{ display: "flex", gap: 12 }}>
                 <span style={{ color: COLORS.textDim, minWidth: 130 }}>{k}</span>
                 <span style={{ color: COLORS.text }}>{String(v)}</span>
@@ -645,11 +672,25 @@ function ApprovalWorkflow({ ticket, rca, onComplete }) {
             Resolution added to AI memory — future similar tickets will benefit
           </div>
         )}
-        <button onClick={() => setResult(null)} style={{
-          padding: "10px 24px", background: COLORS.border, color: COLORS.text,
-          border: "none", borderRadius: 6, cursor: "pointer", fontFamily: "inherit",
-          fontSize: 13, fontWeight: 600,
-        }}>← Back</button>
+        <div style={{ display: "flex", gap: 12 }}>
+          {isSuccess && result.execution_id && (
+            <button onClick={async () => {
+              const rb = await apiFetch(`/executions/${result.execution_id}/rollback`, { method: "POST" });
+              if (rb && !rb.detail) {
+                setResult(prev => ({ ...prev, outcome: "rolled_back", action: "ROLLBACK" }));
+              }
+            }} style={{
+              padding: "10px 24px", background: COLORS.p1 + "22", color: COLORS.p1,
+              border: `1px solid ${COLORS.p1}44`, borderRadius: 6, cursor: "pointer",
+              fontFamily: "inherit", fontSize: 13, fontWeight: 700,
+            }}>⟲ ROLLBACK</button>
+          )}
+          <button onClick={() => setResult(null)} style={{
+            padding: "10px 24px", background: COLORS.border, color: COLORS.text,
+            border: "none", borderRadius: 6, cursor: "pointer", fontFamily: "inherit",
+            fontSize: 13, fontWeight: 600,
+          }}>← Back</button>
+        </div>
       </div>
     );
   }
@@ -1160,6 +1201,7 @@ export default function App() {
   const [selected, setSelected] = useState(null);
   const [rcaData, setRcaData] = useState(null);
   const [apiOk, setApiOk] = useState(null);
+  const [refreshKey, setRefreshKey] = useState(0);
 
   useEffect(() => {
     const style = document.createElement("style");
@@ -1241,7 +1283,7 @@ export default function App() {
         {screen === "feed" && (
           <>
             <div style={{ borderRight: `1px solid ${COLORS.border}`, overflow: "hidden" }}>
-              <TicketFeed onSelectTicket={handleSelectTicket} selected={selected} />
+              <TicketFeed key={refreshKey} onSelectTicket={handleSelectTicket} selected={selected} />
             </div>
             <div style={{ overflow: "hidden" }}>
               <RCADetail ticket={selected} onApprove={handleApprove} />
@@ -1274,7 +1316,7 @@ export default function App() {
           {new Date().toLocaleTimeString()}
         </div>
       </div>
-      <IngestForm onIngested={() => { }} />
+      <IngestForm onIngested={() => setRefreshKey(k => k + 1)} />
     </div>
   );
 }
