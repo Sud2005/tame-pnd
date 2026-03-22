@@ -42,6 +42,7 @@ MIN_RESOLVED    = 5    # minimum resolved tickets needed before RCA is useful
 _faiss_index    = None
 _memory_store   = None   # list of dicts, parallel to FAISS index
 _embed_model    = None
+_index_ready    = False  # flag: True once index is fully loaded
 
 
 # ── Embedding model ───────────────────────────────────────────────────────────
@@ -59,7 +60,8 @@ def get_embed_model():
 def embed_text(text: str) -> np.ndarray:
     """Embed a single string. Returns shape (384,) float32 array."""
     model  = get_embed_model()
-    vector = model.encode(text, convert_to_numpy=True, show_progress_bar=False)
+    vector = model.encode(text, convert_to_numpy=True, show_progress_bar=False,
+                          normalize_embeddings=True)
     return vector.astype(np.float32)
 
 
@@ -82,32 +84,25 @@ def build_ticket_text(ticket: dict) -> str:
     """
     Combines all meaningful fields into one string for embedding.
     Better context = better similarity search.
-    
-    Uses actual ITSM_data.csv fields where available.
     """
     parts = []
 
-    # Description / CI_Name
     desc = ticket.get("description", "")
     if desc and desc.lower() not in ("no description provided", "nan", ""):
         parts.append(desc)
 
-    # Category and subcategory (CI_Cat, CI_Subcat)
     ci_cat    = ticket.get("ci_cat", ticket.get("CI_Cat", ""))
     ci_subcat = ticket.get("ci_subcat", ticket.get("CI_Subcat", ""))
     if ci_cat:    parts.append(f"Component type: {ci_cat}")
     if ci_subcat: parts.append(f"Component: {ci_subcat}")
 
-    # Category
     cat = ticket.get("category", "")
     if cat and cat.lower() not in ("general", "incident", ""):
         parts.append(f"Category: {cat}")
 
-    # Severity
     sev = ticket.get("severity", "")
     if sev: parts.append(f"Severity: {sev}")
 
-    # Resolution notes / Closure_Code (the gold: what fixed it)
     resolution = (
         ticket.get("resolution_notes") or
         ticket.get("closure_code") or
@@ -129,6 +124,7 @@ def build_index(force_rebuild: bool = False) -> tuple:
 
     Returns: (faiss_index, memory_store)
     """
+    global _index_ready
     import faiss
 
     if not force_rebuild and Path(INDEX_PATH).exists() and Path(STORE_PATH).exists():
@@ -137,6 +133,7 @@ def build_index(force_rebuild: bool = False) -> tuple:
         with open(STORE_PATH, "rb") as f:
             store = pickle.load(f)
         print(f"   ✅ Index loaded: {index.ntotal:,} vectors")
+        _index_ready = True
         return index, store
 
     print("🔨 Building FAISS index...")
@@ -146,7 +143,7 @@ def build_index(force_rebuild: bool = False) -> tuple:
     # Attempt 1: resolved tickets WITH resolution notes (ideal for RCA quality)
     rows = conn.execute("""
         SELECT id, description, severity, category, resolution_notes,
-               resolution_time_hrs, status
+               resolution_time_hrs, status, ci_cat, ci_subcat
         FROM   tickets
         WHERE  status = 'resolved'
           AND  resolution_notes IS NOT NULL
@@ -156,12 +153,12 @@ def build_index(force_rebuild: bool = False) -> tuple:
     """).fetchall()
     print(f"   Resolved with notes: {len(rows):,}")
 
-    # Attempt 2: ITSM_data.csv has sparse Closure_Code — use all resolved
+    # Attempt 2: use all resolved
     if len(rows) < MIN_RESOLVED:
         print(f"   ⚠️  Too few with notes. Expanding to all resolved tickets...")
         rows = conn.execute("""
             SELECT id, description, severity, category, resolution_notes,
-                   resolution_time_hrs, status
+                   resolution_time_hrs, status, ci_cat, ci_subcat
             FROM   tickets
             WHERE  status = 'resolved'
             ORDER  BY opened_at DESC
@@ -174,7 +171,7 @@ def build_index(force_rebuild: bool = False) -> tuple:
         print(f"   ⚠️  Not enough resolved. Including all tickets...")
         rows = conn.execute("""
             SELECT id, description, severity, category, resolution_notes,
-                   resolution_time_hrs, status
+                   resolution_time_hrs, status, ci_cat, ci_subcat
             FROM   tickets
             ORDER  BY opened_at DESC
             LIMIT  50000
@@ -195,13 +192,10 @@ def build_index(force_rebuild: bool = False) -> tuple:
     print(f"   Embedding {len(tickets):,} resolved tickets...")
     vectors = embed_batch(texts)
 
-    # IndexFlatIP = inner product (cosine similarity after L2 normalization)
-    # For large datasets (>100k) swap to IndexIVFFlat for faster search
     dim   = vectors.shape[1]
     index = faiss.IndexFlatIP(dim)
     index.add(vectors)
 
-    # Save to disk
     os.makedirs("db", exist_ok=True)
     faiss.write_index(index, INDEX_PATH)
     with open(STORE_PATH, "wb") as f:
@@ -209,6 +203,7 @@ def build_index(force_rebuild: bool = False) -> tuple:
 
     print(f"   ✅ Index built: {index.ntotal:,} vectors (dim={dim})")
     print(f"   💾 Saved to {INDEX_PATH}")
+    _index_ready = True
     return index, tickets
 
 
@@ -220,17 +215,21 @@ def get_index():
     return _faiss_index, _memory_store
 
 
+def is_index_ready() -> bool:
+    """Check if the FAISS index is loaded and ready."""
+    return _index_ready and _faiss_index is not None
+
+
 def add_to_index(ticket: dict):
     """
     Adds a newly resolved ticket to the in-memory index.
     Also persists the updated store to disk.
-    This is how the system learns in real time.
     """
     global _faiss_index, _memory_store
     import faiss
 
     if _faiss_index is None:
-        return  # Index not loaded yet, will be rebuilt on next startup
+        return
 
     text   = build_ticket_text(ticket)
     vector = embed_text(text).reshape(1, -1)
@@ -238,7 +237,6 @@ def add_to_index(ticket: dict):
     _faiss_index.add(vector)
     _memory_store.append(ticket)
 
-    # Persist updated store (re-save index + store)
     faiss.write_index(_faiss_index, INDEX_PATH)
     with open(STORE_PATH, "wb") as f:
         pickle.dump(_memory_store, f)
@@ -246,7 +244,7 @@ def add_to_index(ticket: dict):
 
 # ── Semantic search ───────────────────────────────────────────────────────────
 
-def search_similar(description: str, k: int = 3) -> list[dict]:
+def search_similar(description: str, k: int = 5) -> list[dict]:
     """
     Finds k most similar resolved incidents to the given description.
     Returns list of dicts with ticket data + similarity_score.
@@ -258,14 +256,112 @@ def search_similar(description: str, k: int = 3) -> list[dict]:
 
     results = []
     for score, idx in zip(scores[0], indices[0]):
-        if idx == -1:   # FAISS returns -1 for empty slots
+        if idx == -1:
             continue
         ticket = store[idx].copy()
-        ticket["similarity_score"] = round(float(score), 4)
-        ticket["similarity_pct"]   = round(float(score) * 100, 1)
+        # Cosine similarity is in [-1, 1] after L2 norm; clamp to [0, 1]
+        sim_score = max(0.0, min(1.0, float(score)))
+        ticket["similarity_score"] = round(sim_score, 4)
+        ticket["similarity_pct"]   = round(sim_score * 100, 1)
         results.append(ticket)
 
     return results
+
+
+# ── Confidence calibration ────────────────────────────────────────────────────
+
+def calibrate_confidence(raw_confidence: int, similar: list[dict], ticket: dict) -> int:
+    """
+    Calibrate the LLM's raw confidence using objective signals:
+      - Average similarity score of top matches
+      - Whether resolution notes exist in the matches
+      - Historical fix outcome data for the category
+      - Severity alignment between new and matched tickets
+    
+    Returns adjusted confidence score 0-100.
+    """
+    if not similar:
+        return max(10, raw_confidence // 2)
+
+    # 1. Average similarity of top matches (0-100 scale)
+    avg_sim = np.mean([s.get("similarity_pct", 0) for s in similar[:3]])
+
+    # 2. Resolution coverage — how many matches have actual fixes recorded
+    has_resolution = sum(
+        1 for s in similar[:3]
+        if s.get("resolution_notes") and str(s["resolution_notes"]).lower() not in ("nan", "none", "")
+    )
+    resolution_bonus = has_resolution * 8  # up to +24 for 3 matches with resolutions
+
+    # 3. Severity match bonus — same severity = better pattern
+    ticket_sev = ticket.get("severity", "P3")
+    sev_matches = sum(1 for s in similar[:3] if s.get("severity") == ticket_sev)
+    sev_bonus = sev_matches * 5  # up to +15
+
+    # 4. Category match bonus
+    ticket_cat = ticket.get("category", "General")
+    cat_matches = sum(1 for s in similar[:3] if s.get("category") == ticket_cat)
+    cat_bonus = cat_matches * 4  # up to +12
+
+    # 5. Historical fix outcomes for this category
+    outcome_multiplier = 1.0
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        outcome = conn.execute(
+            "SELECT success_count, total_actions FROM fix_outcomes WHERE category=?",
+            (ticket_cat,)
+        ).fetchone()
+        conn.close()
+        if outcome and outcome["total_actions"] > 0:
+            success_rate = outcome["success_count"] / outcome["total_actions"]
+            outcome_multiplier = 0.7 + (success_rate * 0.3)  # range 0.7-1.0
+    except Exception:
+        pass
+
+    # Blend: 40% LLM confidence + 35% similarity + 25% bonuses
+    blended = (
+        raw_confidence * 0.40 +
+        avg_sim * 0.35 +
+        (resolution_bonus + sev_bonus + cat_bonus) * 0.25
+    )
+    calibrated = int(blended * outcome_multiplier)
+
+    # Clamp to reasonable range — never show 0% if we have data
+    if similar and avg_sim > 30:
+        calibrated = max(calibrated, 25)
+    if similar and avg_sim > 60:
+        calibrated = max(calibrated, 45)
+
+    return max(5, min(95, calibrated))
+
+
+def determine_risk_tier(confidence: int, severity: str, similar: list[dict]) -> str:
+    """
+    Determine risk tier using multi-signal approach.
+    """
+    # Severity-based baseline
+    if severity == "P1":
+        base_risk = "Critical"
+    elif severity == "P2":
+        base_risk = "Medium"
+    else:
+        base_risk = "Low"
+
+    # Confidence can raise risk (low confidence = higher risk)
+    if confidence < 30:
+        return "Critical"
+    if confidence < 50 and base_risk == "Low":
+        return "Medium"
+
+    # High similarity with good matches lowers risk
+    if similar:
+        avg_sim = np.mean([s.get("similarity_pct", 0) for s in similar[:3]])
+        if avg_sim > 70 and confidence > 65:
+            if base_risk == "Critical":
+                return "Medium"  # can't go lower than medium for P1
+
+    return base_risk
 
 
 # ── Groq RCA synthesis prompt ─────────────────────────────────────────────────
@@ -273,11 +369,10 @@ def search_similar(description: str, k: int = 3) -> list[dict]:
 def build_rca_prompt(new_ticket: dict, similar: list[dict]) -> str:
     """
     Builds the prompt that asks Groq to synthesize root cause
-    from the 3 most similar past incidents.
+    from the most similar past incidents.
     """
-    # Format each similar incident
     past_incidents = ""
-    for i, t in enumerate(similar, 1):
+    for i, t in enumerate(similar[:3], 1):
         resolution = (
             t.get("resolution_notes") or
             t.get("closure_code") or
@@ -285,10 +380,10 @@ def build_rca_prompt(new_ticket: dict, similar: list[dict]) -> str:
         )
         past_incidents += f"""
 Past Incident #{i} (Similarity: {t.get('similarity_pct', '?')}%)
-  Incident:   {t.get('description', 'N/A')[:120]}
+  Incident:   {t.get('description', 'N/A')[:150]}
   Category:   {t.get('category', 'N/A')}
   Severity:   {t.get('severity', 'N/A')}
-  Resolution: {resolution[:200]}
+  Resolution: {resolution[:250]}
   MTTR:       {t.get('resolution_time_hrs', 'unknown')} hours
 """
 
@@ -306,7 +401,7 @@ Past Incident #{i} (Similarity: {t.get('similarity_pct', '?')}%)
     return f"""You are a senior IT operations engineer with 15 years of experience.
 You are performing Root Cause Analysis on a new incident.
 
-You have access to 3 similar resolved incidents from the past as reference.
+You have access to similar resolved incidents from the past as reference.
 
 ─── NEW INCIDENT ───────────────────────────────────────────────
 Description: {new_desc}
@@ -316,19 +411,18 @@ Context:     {context}
 {past_incidents}
 
 Based on the patterns in these past incidents, perform a thorough RCA.
+Provide a CONCRETE root cause and actionable fix. Be specific, not vague.
 
 Respond ONLY with valid JSON. No markdown. No explanation outside the JSON.
 
 {{
-  "root_cause": "Clear explanation of the most likely root cause, 1-2 sentences, grounded in the past incident patterns",
-  "confidence_score": integer 0-100,
-  "risk_tier": "Low or Medium or Critical",
-  "recommended_fix": "The single most important first action to take right now",
-  "fix_steps": ["step 1", "step 2", "step 3"],
+  "root_cause": "Clear, specific explanation of the most likely root cause based on patterns in the similar incidents. Be concrete.",
+  "recommended_fix": "The single most important specific action to take right now. Be precise and actionable.",
+  "fix_steps": ["step 1 - specific action", "step 2 - specific action", "step 3 - specific action"],
   "estimated_resolution_hrs": number,
   "pattern_match": "What common pattern across the past incidents led to this diagnosis",
   "source_citations": ["Past Incident #1: brief note", "Past Incident #2: brief note"],
-  "warnings": "Any risks or caveats the operator should know before executing the fix, or null"
+  "warnings": "Any risks or caveats the operator should know, or null"
 }}"""
 
 
@@ -339,17 +433,11 @@ def run_rca(ticket_id: str) -> dict:
     Full RCA pipeline for one ticket.
 
     1. Load ticket from DB
-    2. Search FAISS for 3 similar resolved incidents
+    2. Search FAISS for similar resolved incidents
     3. Build prompt + call Groq
-    4. Parse response
+    4. Parse response + calibrate confidence
     5. Write to rca_results table + audit log
     6. Return full result
-
-    Args:
-        ticket_id: ID of the ticket to analyse
-
-    Returns:
-        dict with full RCA result including approval_path
     """
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
@@ -367,22 +455,22 @@ def run_rca(ticket_id: str) -> dict:
     rca_id  = str(uuid.uuid4())
     now     = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    # Load prediction context if available (enriches RCA)
+    # Load prediction context if available
     pred_row = conn.execute(
         "SELECT * FROM predictions WHERE ticket_id = ? ORDER BY created_at DESC LIMIT 1",
         (ticket_id,)
     ).fetchone()
     if pred_row:
         pred = dict(pred_row)
-        ticket["ci_cat"]   = ticket.get("ci_cat", pred.get("predicted_category",""))
-        ticket["category"] = ticket.get("category", pred.get("predicted_category",""))
+        ticket["ci_cat"]   = ticket.get("ci_cat") or pred.get("predicted_category", "")
+        ticket["category"] = ticket.get("category") or pred.get("predicted_category", "")
 
     result = None
 
     try:
         # ── Step 1: FAISS semantic search ─────────────────────────────────────
-        description = ticket.get("description","")
-        similar     = search_similar(description, k=3)
+        description = ticket.get("description", "")
+        similar     = search_similar(description, k=5)
 
         if not similar:
             raise RuntimeError("No similar incidents found in index")
@@ -403,13 +491,14 @@ def run_rca(ticket_id: str) -> dict:
                     "role": "system",
                     "content": (
                         "You are an expert IT operations engineer performing root cause analysis. "
-                        "Always respond with valid JSON only. No markdown. No extra text."
+                        "Always respond with valid JSON only. No markdown. No extra text. "
+                        "Be specific and actionable in your analysis."
                     )
                 },
                 {"role": "user", "content": prompt}
             ],
-            temperature=0.2,     # Slightly higher than prediction — we want thoughtful analysis
-            max_tokens=600,
+            temperature=0.3,
+            max_tokens=800,
         )
 
         raw = response.choices[0].message.content
@@ -417,19 +506,20 @@ def run_rca(ticket_id: str) -> dict:
         # ── Step 3: Parse response ────────────────────────────────────────────
         parsed = _parse_rca_response(raw)
 
-        # ── Step 4: Determine approval path from RCA confidence ───────────────
-        # RCA result can change the approval path if it discovers higher risk
-        sev    = ticket.get("severity","P3")
-        conf   = parsed["confidence_score"]
-        risk   = parsed["risk_tier"]
-        path   = _get_approval_path(conf, risk, sev)
+        # ── Step 4: Calibrate confidence + determine risk ─────────────────────
+        # Don't trust the LLM's confidence blindly — calibrate with data
+        raw_conf   = parsed.get("raw_confidence", 60)
+        confidence = calibrate_confidence(raw_conf, similar, ticket)
+        sev        = ticket.get("severity", "P3")
+        risk       = determine_risk_tier(confidence, sev, similar)
+        path       = _get_approval_path(confidence, risk, sev)
 
         result = {
             "id":                       rca_id,
             "ticket_id":                ticket_id,
             "root_cause":               parsed["root_cause"],
-            "confidence_score":         parsed["confidence_score"],
-            "risk_tier":                parsed["risk_tier"],
+            "confidence_score":         confidence,
+            "risk_tier":                risk,
             "recommended_fix":          parsed["recommended_fix"],
             "fix_steps":                parsed["fix_steps"],
             "estimated_resolution_hrs": parsed["estimated_resolution_hrs"],
@@ -439,16 +529,16 @@ def run_rca(ticket_id: str) -> dict:
             "approval_path":            path,
             "similar_incidents":        [
                 {
-                    "id":               s.get("id",""),
-                    "description":      s.get("description","")[:100],
-                    "resolution":       (s.get("resolution_notes") or s.get("closure_code",""))[:150],
+                    "id":               s.get("id", ""),
+                    "description":      s.get("description", "")[:120],
+                    "resolution":       (s.get("resolution_notes") or s.get("closure_code", ""))[:150],
                     "similarity_score": s.get("similarity_score", 0),
                     "similarity_pct":   s.get("similarity_pct", 0),
-                    "severity":         s.get("severity",""),
-                    "category":         s.get("category",""),
-                    "mttr_hrs":         s.get("resolution_time_hrs",""),
+                    "severity":         s.get("severity", ""),
+                    "category":         s.get("category", ""),
+                    "mttr_hrs":         s.get("resolution_time_hrs", ""),
                 }
-                for s in similar
+                for s in similar[:3]
             ],
             "model_used":   GROQ_MODEL,
             "status":       "success",
@@ -456,6 +546,8 @@ def run_rca(ticket_id: str) -> dict:
 
     except Exception as e:
         print(f"⚠️  RCA failed for {ticket_id}: {e}")
+        import traceback
+        traceback.print_exc()
         result = _fallback_rca(ticket_id, rca_id, str(e))
 
     # ── Step 5: Persist to DB ─────────────────────────────────────────────────
@@ -473,7 +565,7 @@ def run_rca(ticket_id: str) -> dict:
             sim[0]["id"] if len(sim) > 0 else None,
             sim[1]["id"] if len(sim) > 1 else None,
             sim[2]["id"] if len(sim) > 2 else None,
-            json.dumps([s.get("similarity_score",0) for s in sim]),
+            json.dumps([s.get("similarity_score", 0) for s in sim]),
             result["confidence_score"],
             result["risk_tier"],
             now,
@@ -521,16 +613,20 @@ def _parse_rca_response(raw: str) -> dict:
 
     p = json.loads(text[start:end])
 
+    # Store original LLM confidence for calibration, default reasonably
+    raw_conf = int(p.get("confidence_score", 65))
+    p["raw_confidence"] = max(0, min(100, raw_conf))
+
     # Normalize with safe defaults
-    p["root_cause"]               = str(p.get("root_cause","Unknown root cause"))
-    p["confidence_score"]         = max(0, min(100, int(p.get("confidence_score", 60))))
-    p["risk_tier"]                = str(p.get("risk_tier","Medium")).strip().title()
+    p["root_cause"]               = str(p.get("root_cause", "Unknown root cause"))
+    p["confidence_score"]         = p["raw_confidence"]  # will be overridden by calibration
+    p["risk_tier"]                = str(p.get("risk_tier", "Medium")).strip().title()
     if p["risk_tier"] not in ("Low","Medium","Critical"): p["risk_tier"] = "Medium"
-    p["recommended_fix"]          = str(p.get("recommended_fix","Escalate to senior engineer"))
+    p["recommended_fix"]          = str(p.get("recommended_fix", "Escalate to senior engineer"))
     p["fix_steps"]                = p.get("fix_steps", [])
     if not isinstance(p["fix_steps"], list): p["fix_steps"] = [str(p["fix_steps"])]
     p["estimated_resolution_hrs"] = float(p.get("estimated_resolution_hrs", 2.0))
-    p["pattern_match"]            = str(p.get("pattern_match",""))
+    p["pattern_match"]            = str(p.get("pattern_match", ""))
     p["source_citations"]         = p.get("source_citations", [])
     if not isinstance(p["source_citations"], list): p["source_citations"] = []
 
@@ -538,29 +634,104 @@ def _parse_rca_response(raw: str) -> dict:
 
 
 def _get_approval_path(confidence: int, risk_tier: str, severity: str) -> str:
-    if severity == "P1" or risk_tier == "Critical": return "C"
-    if risk_tier == "Medium" or confidence < 85:    return "B"
-    return "A"
+    """
+    Determines approval workflow path based on calibrated confidence, risk, and severity.
+    
+    Path A (Auto-execute):  High confidence (≥75%) + Low risk + P3
+    Path B (Operator approval): Medium confidence or medium risk or P2
+    Path C (Senior review): Low confidence (<40%) or Critical risk or P1
+    """
+    # P1 always needs senior review
+    if severity == "P1":
+        return "C"
+    
+    # Critical risk always needs senior review
+    if risk_tier == "Critical":
+        return "C"
+    
+    # Low confidence needs senior review
+    if confidence < 40:
+        return "C"
+    
+    # P3 with high confidence + low risk = auto-execute
+    if severity == "P3" and confidence >= 75 and risk_tier == "Low":
+        return "A"
+    
+    # P3 with decent confidence = operator just approves
+    if severity == "P3" and confidence >= 55:
+        return "B"
+    
+    # P2 with high confidence and not critical = operator approval  
+    if severity == "P2" and confidence >= 60:
+        return "B"
+    
+    # Default for P2 with lower confidence
+    if severity == "P2":
+        return "C"
+
+    # Default: operator approval
+    return "B"
 
 
 def _fallback_rca(ticket_id: str, rca_id: str, error: str) -> dict:
+    """
+    Fallback when RCA engine encounters an error.
+    Still provides useful guidance instead of just "unavailable".
+    """
+    # Try to pull useful context from the ticket itself
+    root_cause = "Automated RCA could not complete — likely infrastructure or configuration issue"
+    fix = "Check service logs and recent deployment changes"
+    fix_steps = [
+        "Review application and system logs for errors in the last 2 hours",
+        "Check if any recent deployments or config changes correlate with the incident",
+        "Verify service health across dependent systems (DB, cache, queues)",
+        "Escalate to on-call engineer if root cause not identified within 30 minutes",
+    ]
+    
+    # If the error hints at what went wrong, give a better message
+    err_lower = error.lower()
+    if "api_key" in err_lower or "groq" in err_lower:
+        root_cause = "RCA analysis engine temporarily unavailable (API connectivity issue)"
+        fix = "Retry RCA in 30 seconds — if persistent, check GROQ_API_KEY configuration"
+    elif "index" in err_lower or "faiss" in err_lower:
+        root_cause = "Knowledge base index is rebuilding — RCA will be available shortly"
+        fix = "Wait 15 seconds and retry — the system is loading historical incident data"
+    elif "timeout" in err_lower:
+        root_cause = "RCA timed out due to high load — retry should succeed"
+        fix = "Retry RCA — the AI model is experiencing high latency"
+
     return {
         "id":                       rca_id,
         "ticket_id":                ticket_id,
-        "root_cause":               "RCA unavailable — manual investigation required",
-        "confidence_score":         0,
-        "risk_tier":                "Critical",
-        "recommended_fix":          "Escalate to senior engineer immediately",
-        "fix_steps":                ["Escalate to on-call engineer", "Gather logs", "Investigate manually"],
-        "estimated_resolution_hrs": 4.0,
-        "pattern_match":            "No pattern match available",
+        "root_cause":               root_cause,
+        "confidence_score":         15,
+        "risk_tier":                "Medium",
+        "recommended_fix":          fix,
+        "fix_steps":                fix_steps,
+        "estimated_resolution_hrs": 2.0,
+        "pattern_match":            "Unable to match patterns — manual review needed",
         "source_citations":         [],
-        "warnings":                 f"RCA engine error: {error[:100]}",
+        "warnings":                 f"Automated RCA encountered: {error[:150]}. Retry recommended.",
         "approval_path":            "C",
         "similar_incidents":        [],
         "model_used":               "fallback",
         "status":                   "fallback",
     }
+
+
+# ── Startup helper — pre-warm index in background ────────────────────────────
+
+def prewarm_index():
+    """Call at server startup to load index in background thread."""
+    import threading
+    def _load():
+        try:
+            get_index()
+            print("🔥 FAISS index pre-warmed and ready")
+        except Exception as e:
+            print(f"⚠️  Index pre-warm failed: {e}")
+    t = threading.Thread(target=_load, daemon=True)
+    t.start()
 
 
 # ── Standalone test ───────────────────────────────────────────────────────────
@@ -569,7 +740,6 @@ if __name__ == "__main__":
     print("\n🧪 Phase 3 — RCA Engine Test")
     print("=" * 60)
 
-    # Step 1: Build index
     print("\n[1] Building FAISS index...")
     try:
         index, store = build_index(force_rebuild=True)
@@ -578,7 +748,6 @@ if __name__ == "__main__":
         print(f"    ❌ {e}")
         exit(1)
 
-    # Step 2: Test semantic search
     print("\n[2] Semantic Search Test")
     test_queries = [
         "Database connection pool exhausted, application throwing errors",
@@ -591,7 +760,6 @@ if __name__ == "__main__":
         for r in results:
             print(f"      {r['similarity_pct']:5.1f}%  [{r['severity']}] {r['description'][:60]}")
 
-    # Step 3: Full RCA on a real ticket from DB
     print("\n[3] Full RCA Pipeline Test")
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row

@@ -194,7 +194,7 @@ function TicketFeed({ onSelectTicket, selected }) {
     }
     if (s) setStats(s);
     setLoading(false);
-  }, []);
+  }, [filter]);
 
   useEffect(() => {
     load();
@@ -328,11 +328,23 @@ function RCADetail({ ticket, onApprove }) {
   async function triggerRCA() {
     setTriggering(true);
     await apiFetch(`/tickets/${ticket.id}/rca`, { method: "POST" });
-    setTimeout(async () => {
+    // Poll for result every 3s, up to 10 attempts (30s total)
+    let attempts = 0;
+    const maxAttempts = 10;
+    const poll = setInterval(async () => {
+      attempts++;
       const r = await apiFetch(`/tickets/${ticket.id}/rca/result`);
-      if (r?.status !== "pending") setRca(r);
-      setTriggering(false);
-    }, 6000);
+      if (r && r.status !== "pending") {
+        clearInterval(poll);
+        setRca(r);
+        setTriggering(false);
+      } else if (attempts >= maxAttempts) {
+        clearInterval(poll);
+        setTriggering(false);
+        // Show whatever we got (even fallback)
+        if (r) setRca(r);
+      }
+    }, 3000);
   }
 
   if (!ticket) return (
@@ -1006,6 +1018,448 @@ function AuditTrail() {
   );
 }
 
+// ── Screen 5: Memory Browser — all 46,000 tickets ────────────────────────────
+function MemoryBrowser() {
+  const [overview, setOverview]   = useState(null);
+  const [tickets,  setTickets]    = useState([]);
+  const [total,    setTotal]      = useState(0);
+  const [loading,  setLoading]    = useState(false);
+  const [search,   setSearch]     = useState("");
+  const [sevFilter,setSevFilter]  = useState("");
+  const [catFilter,setCatFilter]  = useState("");
+  const [statFilter,setStatFilter]= useState("");
+  const [offset,   setOffset]     = useState(0);
+  const PAGE = 100;
+
+  // Load overview stats once
+  useEffect(() => {
+    apiFetch("/tickets/overview").then(d => { if (d) setOverview(d); });
+  }, []);
+
+  // Search tickets when filters change
+  const doSearch = useCallback(async (off = 0) => {
+    setLoading(true);
+    const params = new URLSearchParams({
+      limit: PAGE, offset: off,
+      ...(search    && { q: search }),
+      ...(sevFilter && { severity: sevFilter }),
+      ...(catFilter && { category: catFilter }),
+      ...(statFilter&& { status:   statFilter }),
+    });
+    const data = await apiFetch(`/tickets/search?${params}`);
+    if (data) {
+      setTickets(data.tickets || []);
+      setTotal(data.total || 0);
+      setOffset(off);
+    }
+    setLoading(false);
+  }, [search, sevFilter, catFilter, statFilter]);
+
+  useEffect(() => { doSearch(0); }, [doSearch]);
+
+  const categories = ["","Database","Network","Authentication","Infrastructure","Application","General"];
+  const statuses   = ["","open","pending_approval","resolved"];
+
+  function exportCSV() {
+    if (!tickets.length) return;
+    const headers = Object.keys(tickets[0]).join(",");
+    const rows    = tickets.map(t =>
+      Object.values(t).map(v => `"${String(v||"").replace(/"/g,'""')}"`).join(",")
+    );
+    const blob = new Blob([[headers,...rows].join("\n")], { type:"text/csv" });
+    const a    = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = `opsai_memory_${Date.now()}.csv`;
+    a.click();
+  }
+
+  return (
+    <div style={{ height:"100%", display:"flex", flexDirection:"column", padding:24, gap:16, overflow:"hidden" }}>
+
+      {/* Header */}
+      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start" }}>
+        <div>
+          <div style={{ fontSize:18, fontWeight:800, letterSpacing:"-0.02em" }}>
+            Memory Browser
+          </div>
+          <div style={{ fontSize:12, color:COLORS.textDim, marginTop:2 }}>
+            Full dataset — {total.toLocaleString()} tickets · This is the AI's long-term memory
+          </div>
+        </div>
+        <button onClick={exportCSV} style={{
+          padding:"8px 16px", background:COLORS.accent, color:COLORS.bg,
+          border:"none", borderRadius:6, fontSize:12, fontWeight:700,
+          cursor:"pointer", fontFamily:"inherit",
+        }}>⬇ EXPORT CSV</button>
+      </div>
+
+      {/* Overview stat cards */}
+      {overview && (
+        <div style={{ display:"grid", gridTemplateColumns:"repeat(5,1fr)", gap:10 }}>
+          <Card style={{ padding:"12px 14px" }}>
+            <div className="mono" style={{ fontSize:9, color:COLORS.textDim, letterSpacing:"0.1em" }}>TOTAL TICKETS</div>
+            <div style={{ fontSize:24, fontWeight:800, color:COLORS.accent, lineHeight:1.2, marginTop:4 }}>
+              {(overview.by_severity?.reduce((a,r)=>a+r.count,0)||0).toLocaleString()}
+            </div>
+          </Card>
+          <Card style={{ padding:"12px 14px" }}>
+            <div className="mono" style={{ fontSize:9, color:COLORS.textDim, letterSpacing:"0.1em" }}>WITH RESOLUTION</div>
+            <div style={{ fontSize:24, fontWeight:800, color:COLORS.p3, lineHeight:1.2, marginTop:4 }}>
+              {(overview.with_resolution||0).toLocaleString()}
+            </div>
+          </Card>
+          <Card style={{ padding:"12px 14px" }}>
+            <div className="mono" style={{ fontSize:9, color:COLORS.textDim, letterSpacing:"0.1em" }}>AVG MTTR</div>
+            <div style={{ fontSize:24, fontWeight:800, color:COLORS.p2, lineHeight:1.2, marginTop:4 }}>
+              {overview.avg_mttr_hrs ? `${overview.avg_mttr_hrs}h` : "—"}
+            </div>
+          </Card>
+          {(overview.by_severity||[]).filter(r=>["P1","P2"].includes(r.severity)).map(r=>(
+            <Card key={r.severity} style={{ padding:"12px 14px" }}>
+              <div className="mono" style={{ fontSize:9, color:COLORS.textDim, letterSpacing:"0.1em" }}>
+                {r.severity} TICKETS
+              </div>
+              <div style={{ fontSize:24, fontWeight:800, color:SEV_COLOR[r.severity], lineHeight:1.2, marginTop:4 }}>
+                {r.count.toLocaleString()}
+              </div>
+            </Card>
+          ))}
+        </div>
+      )}
+
+      {/* Category breakdown bar */}
+      {overview?.by_category && (
+        <Card style={{ padding:"14px 16px" }}>
+          <div className="mono" style={{ fontSize:9, color:COLORS.textDim, letterSpacing:"0.1em", marginBottom:10 }}>
+            DISTRIBUTION BY CATEGORY
+          </div>
+          <div style={{ display:"flex", gap:6, flexWrap:"wrap" }}>
+            {overview.by_category.map(r => {
+              const total_all = overview.by_category.reduce((a,x)=>a+x.count,0);
+              const pct = Math.round((r.count/total_all)*100);
+              return (
+                <div key={r.category} onClick={() => setCatFilter(catFilter===r.category?"":r.category)}
+                  style={{
+                    padding:"6px 12px", borderRadius:4, cursor:"pointer",
+                    background: catFilter===r.category ? COLORS.accent+"33" : COLORS.surface,
+                    border:`1px solid ${catFilter===r.category ? COLORS.accent : COLORS.border}`,
+                    display:"flex", alignItems:"center", gap:6,
+                  }}>
+                  <span style={{ fontSize:11, fontWeight:700, color:catFilter===r.category?COLORS.accent:COLORS.text }}>
+                    {r.category}
+                  </span>
+                  <span className="mono" style={{ fontSize:10, color:COLORS.textDim }}>
+                    {r.count.toLocaleString()} ({pct}%)
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+        </Card>
+      )}
+
+      {/* Search + filters */}
+      <div style={{ display:"flex", gap:10, alignItems:"center" }}>
+        <input
+          value={search}
+          onChange={e => setSearch(e.target.value)}
+          placeholder="Search descriptions, resolutions, ticket IDs..."
+          style={{
+            flex:1, padding:"9px 14px",
+            background:COLORS.surface, border:`1px solid ${COLORS.border}`,
+            borderRadius:6, color:COLORS.text, fontSize:13,
+            fontFamily:"inherit", outline:"none",
+          }}
+        />
+        {[
+          { val:sevFilter,  set:setSevFilter,  opts:["","P1","P2","P3"],  label:"Severity" },
+          { val:statFilter, set:setStatFilter, opts:statuses,              label:"Status"   },
+        ].map(f => (
+          <select key={f.label} value={f.val} onChange={e=>f.set(e.target.value)} style={{
+            padding:"9px 12px", background:COLORS.surface, border:`1px solid ${COLORS.border}`,
+            borderRadius:6, color:COLORS.text, fontSize:12, fontFamily:"inherit",
+            outline:"none", cursor:"pointer", minWidth:110,
+          }}>
+            <option value="">{f.label}: All</option>
+            {f.opts.filter(o=>o).map(o=><option key={o} value={o}>{o}</option>)}
+          </select>
+        ))}
+        {(search||sevFilter||catFilter||statFilter) && (
+          <button onClick={()=>{setSearch("");setSevFilter("");setCatFilter("");setStatFilter("");}}
+            style={{
+              padding:"9px 14px", background:COLORS.border, color:COLORS.textDim,
+              border:"none", borderRadius:6, fontSize:12, cursor:"pointer", fontFamily:"inherit",
+            }}>
+            ✕ Clear
+          </button>
+        )}
+      </div>
+
+      {/* Results count */}
+      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center" }}>
+        <div className="mono" style={{ fontSize:10, color:COLORS.textDim }}>
+          {loading ? "Searching..." : `${total.toLocaleString()} results · showing ${offset+1}–${Math.min(offset+PAGE, total)}`}
+        </div>
+        <div style={{ display:"flex", gap:8 }}>
+          <button onClick={()=>doSearch(Math.max(0,offset-PAGE))} disabled={offset===0} style={{
+            padding:"4px 12px", background:COLORS.surface, color:offset===0?COLORS.border:COLORS.text,
+            border:`1px solid ${COLORS.border}`, borderRadius:4, fontSize:11,
+            cursor:offset===0?"not-allowed":"pointer", fontFamily:"inherit",
+          }}>← Prev</button>
+          <button onClick={()=>doSearch(offset+PAGE)} disabled={offset+PAGE>=total} style={{
+            padding:"4px 12px", background:COLORS.surface,
+            color:offset+PAGE>=total?COLORS.border:COLORS.text,
+            border:`1px solid ${COLORS.border}`, borderRadius:4, fontSize:11,
+            cursor:offset+PAGE>=total?"not-allowed":"pointer", fontFamily:"inherit",
+          }}>Next →</button>
+        </div>
+      </div>
+
+      {/* Ticket table */}
+      <div style={{ flex:1, overflowY:"auto" }}>
+        {loading && <div style={{ textAlign:"center", padding:30 }}><Spinner /></div>}
+        {!loading && tickets.length === 0 && (
+          <div style={{ textAlign:"center", padding:40, color:COLORS.textDim, fontSize:13 }}>
+            No tickets match your search
+          </div>
+        )}
+        <table style={{ width:"100%", borderCollapse:"collapse", fontSize:12 }}>
+          <thead>
+            <tr style={{ position:"sticky", top:0, background:COLORS.surface }}>
+              {["TICKET ID","SEVERITY","CATEGORY","DESCRIPTION","RESOLUTION","MTTR","STATUS"].map(h=>(
+                <th key={h} className="mono" style={{
+                  padding:"8px 10px", textAlign:"left", fontSize:9,
+                  color:COLORS.textDim, letterSpacing:"0.08em",
+                  borderBottom:`1px solid ${COLORS.border}`, whiteSpace:"nowrap",
+                }}>{h}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {tickets.map((t,i) => {
+              const hasResolution = t.resolution_notes &&
+                !["","nan","None","NaN"].includes(t.resolution_notes);
+              return (
+                <tr key={t.id||i} style={{ borderBottom:`1px solid ${COLORS.border}22` }}
+                  onMouseEnter={e=>e.currentTarget.style.background=COLORS.border+"33"}
+                  onMouseLeave={e=>e.currentTarget.style.background="transparent"}>
+                  <td className="mono" style={{ padding:"8px 10px", color:COLORS.accent, fontSize:10, whiteSpace:"nowrap" }}>
+                    {t.id}
+                  </td>
+                  <td style={{ padding:"8px 10px", whiteSpace:"nowrap" }}>
+                    <Badge label={t.severity||"?"} color={SEV_COLOR[t.severity]||COLORS.textDim} dim={SEV_DIM[t.severity]} />
+                  </td>
+                  <td style={{ padding:"8px 10px", whiteSpace:"nowrap" }}>
+                    <Badge label={t.category||"General"} color={COLORS.textDim} />
+                  </td>
+                  <td style={{ padding:"8px 10px", maxWidth:260,
+                    overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap",
+                    color:COLORS.text }}>
+                    {t.description||"—"}
+                  </td>
+                  <td style={{ padding:"8px 10px", maxWidth:220,
+                    overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap",
+                    color: hasResolution ? COLORS.p3 : COLORS.border,
+                    fontStyle: hasResolution ? "normal" : "italic", fontSize:11 }}>
+                    {hasResolution ? t.resolution_notes : "No resolution recorded"}
+                  </td>
+                  <td className="mono" style={{ padding:"8px 10px", color:COLORS.textDim, fontSize:10, whiteSpace:"nowrap" }}>
+                    {t.resolution_time_hrs ? `${t.resolution_time_hrs}h` : "—"}
+                  </td>
+                  <td style={{ padding:"8px 10px", whiteSpace:"nowrap" }}>
+                    <Badge label={t.status?.replace("_"," ")||"?"} color={
+                      t.status==="resolved"?"#00E676":
+                      t.status==="open"?"#FFB020":
+                      t.status==="pending_approval"?"#00D4FF":COLORS.textDim
+                    } />
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+// ── Ingest Form — floating + button, modal with presets ──────────────────────
+function IngestForm({ onIngested }) {
+  const [open, setOpen]     = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [result, setResult]   = useState(null);
+  const [form, setForm] = useState({
+    description: "", ci_cat: "storage", urgency: "3",
+    impact: "3", alert_status: "False", source: "manual",
+  });
+
+  const PRESETS = [
+    { label: "🔴 P1 — DB Outage",
+      data: { description: "SAN storage array reporting hardware fault, database writes failing across cluster",
+              severity: "P1", ci_cat: "storage", urgency: "1", impact: "1", alert_status: "True" } },
+    { label: "🔴 P1 — Auth Down",
+      data: { description: "Authentication service returning 500 errors, login requests rejected for all tenants",
+              severity: "P1", ci_cat: "application", urgency: "1", impact: "1", alert_status: "True" } },
+    { label: "🟡 P2 — App Slow",
+      data: { description: "Web application response times elevated to 8 seconds, subset of users affected",
+              severity: "P2", ci_cat: "subapplication", urgency: "2", impact: "2", alert_status: "False" } },
+    { label: "🟡 P2 — DB Lag",
+      data: { description: "Database replication lag increasing on secondary node, reads becoming stale",
+              severity: "P2", ci_cat: "storage", urgency: "2", impact: "3", alert_status: "False" } },
+    { label: "🟢 P3 — Certificate",
+      data: { description: "SSL certificate on internal reporting dashboard expiring in 14 days, renewal needed",
+              severity: "P3", ci_cat: "", urgency: "4", impact: "4", alert_status: "False" } },
+  ];
+
+  async function submit() {
+    if (!form.description.trim()) return;
+    setLoading(true); setResult(null);
+    const payload = { ...form };
+    // Remove severity key if empty so backend auto-detects
+    if (!payload.severity) delete payload.severity;
+    const data = await apiFetch("/tickets/ingest", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+    setLoading(false);
+    if (data?.id) {
+      setResult(data);
+      setForm(f => ({ ...f, description: "", severity: "" }));
+      if (onIngested) onIngested(data);
+    }
+  }
+
+  return (
+    <>
+      {/* Floating + button */}
+      <button onClick={() => setOpen(o => !o)} style={{
+        position: "fixed", bottom: 32, right: 32,
+        width: 52, height: 52, borderRadius: "50%",
+        background: COLORS.accent, color: COLORS.bg,
+        border: "none", cursor: "pointer", fontSize: 24, fontWeight: 800,
+        boxShadow: `0 0 0 0 ${COLORS.accent}44`,
+        animation: "auto-execute 2s ease infinite",
+        zIndex: 200, display: "flex", alignItems: "center", justifyContent: "center",
+      }} title="Ingest new ticket">
+        {open ? "✕" : "+"}
+      </button>
+
+      {/* Modal overlay */}
+      {open && (
+        <div onClick={e => { if (e.target === e.currentTarget) setOpen(false); }}
+          style={{
+            position: "fixed", inset: 0, background: "rgba(0,0,0,0.75)",
+            zIndex: 199, display: "flex", alignItems: "center", justifyContent: "center",
+            animation: "fade-in 0.2s ease",
+          }}>
+          <div style={{
+            width: 560, background: COLORS.card,
+            border: `1px solid ${COLORS.border}`, borderRadius: 12,
+            padding: 28, animation: "slide-in 0.25s ease",
+          }}>
+            <div style={{ fontSize: 16, fontWeight: 800, marginBottom: 4 }}>Ingest New Ticket</div>
+            <div style={{ fontSize: 12, color: COLORS.textDim, marginBottom: 18 }}>
+              Submits to live API → AI prediction + RCA triggered automatically
+            </div>
+
+            {/* Presets */}
+            <div className="mono" style={{ fontSize: 9, color: COLORS.textDim, letterSpacing: "0.1em", marginBottom: 8 }}>
+              QUICK PRESETS
+            </div>
+            <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 18 }}>
+              {PRESETS.map(p => (
+                <button key={p.label} onClick={() => setForm(f => ({ ...f, ...p.data }))} style={{
+                  padding: "5px 11px", borderRadius: 4, border: `1px solid ${COLORS.border}`,
+                  background: COLORS.surface, color: COLORS.text,
+                  fontSize: 11, cursor: "pointer", fontFamily: "inherit", fontWeight: 600,
+                }}>{p.label}</button>
+              ))}
+            </div>
+
+            {/* Description */}
+            <div className="mono" style={{ fontSize: 9, color: COLORS.textDim, letterSpacing: "0.08em", marginBottom: 6 }}>
+              DESCRIPTION *
+            </div>
+            <textarea value={form.description}
+              onChange={e => setForm(f => ({ ...f, description: e.target.value }))}
+              placeholder="Describe the incident..."
+              rows={3} style={{
+                width: "100%", padding: "10px 12px", marginBottom: 14,
+                background: COLORS.surface, border: `1px solid ${COLORS.border}`,
+                borderRadius: 6, color: COLORS.text, fontSize: 13,
+                fontFamily: "inherit", resize: "vertical", outline: "none",
+              }} />
+
+            {/* Field row */}
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 10, marginBottom: 18 }}>
+              {[
+                { key: "ci_cat",       label: "CI TYPE",   options: ["storage","application","subapplication","network","hardware",""] },
+                { key: "urgency",      label: "URGENCY",   options: ["1","2","3","4"] },
+                { key: "impact",       label: "IMPACT",    options: ["1","2","3","4"] },
+                { key: "alert_status", label: "ALERT",     options: ["False","True"] },
+              ].map(field => (
+                <div key={field.key}>
+                  <div className="mono" style={{ fontSize: 9, color: COLORS.textDim, marginBottom: 4, letterSpacing: "0.08em" }}>
+                    {field.label}
+                  </div>
+                  <select value={form[field.key]}
+                    onChange={e => setForm(f => ({ ...f, [field.key]: e.target.value }))}
+                    style={{
+                      width: "100%", padding: "6px 8px",
+                      background: COLORS.surface, border: `1px solid ${COLORS.border}`,
+                      borderRadius: 4, color: COLORS.text, fontSize: 12,
+                      fontFamily: "inherit", outline: "none", cursor: "pointer",
+                    }}>
+                    {field.options.map(o => <option key={o} value={o}>{o || "(auto)"}</option>)}
+                  </select>
+                </div>
+              ))}
+            </div>
+
+            {/* Result feedback */}
+            {result && (
+              <div style={{
+                padding: "10px 14px", borderRadius: 6, marginBottom: 14,
+                background: COLORS.p3 + "15", border: `1px solid ${COLORS.p3}33`,
+              }}>
+                <div className="mono" style={{ fontSize: 11, color: COLORS.p3 }}>
+                  ✓ {result.id} · {result.severity} · {result.category}
+                </div>
+                {result.anomaly_flags?.length > 0 && (
+                  <div className="mono" style={{ fontSize: 10, color: COLORS.p2, marginTop: 3 }}>
+                    ⚠ {result.anomaly_flags.join(", ")}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Buttons */}
+            <div style={{ display: "flex", gap: 10 }}>
+              <button onClick={submit} disabled={!form.description.trim() || loading} style={{
+                flex: 1, padding: "12px",
+                background: form.description.trim() ? COLORS.accent : COLORS.border,
+                color: form.description.trim() ? COLORS.bg : COLORS.textDim,
+                border: "none", borderRadius: 6, fontSize: 13, fontWeight: 800,
+                cursor: form.description.trim() && !loading ? "pointer" : "not-allowed",
+                fontFamily: "inherit",
+              }}>
+                {loading
+                  ? <span style={{ display:"flex",alignItems:"center",justifyContent:"center",gap:8 }}><Spinner /> Ingesting...</span>
+                  : "▶ INGEST TICKET"}
+              </button>
+              <button onClick={() => setOpen(false)} style={{
+                padding: "12px 18px", background: COLORS.surface, color: COLORS.textDim,
+                border: `1px solid ${COLORS.border}`, borderRadius: 6,
+                fontSize: 13, cursor: "pointer", fontFamily: "inherit",
+              }}>Cancel</button>
+            </div>
+          </div>
+        </div>
+      )}
+    </>
+  );
+}
+
 // ── Main App Shell ────────────────────────────────────────────────────────────
 export default function App() {
   const [screen, setScreen]   = useState("feed");
@@ -1042,10 +1496,11 @@ export default function App() {
   }
 
   const NAV = [
-    { id: "feed",     label: "01  LIVE FEED",    icon: "⬡" },
-    { id: "rca",      label: "02  RCA DETAIL",   icon: "⬡" },
-    { id: "approval", label: "03  APPROVAL",     icon: "⬡" },
-    { id: "audit",    label: "04  AUDIT TRAIL",  icon: "⬡" },
+    { id: "feed",     label: "01  LIVE FEED",      icon: "⬡" },
+    { id: "rca",      label: "02  RCA DETAIL",     icon: "⬡" },
+    { id: "approval", label: "03  APPROVAL",       icon: "⬡" },
+    { id: "audit",    label: "04  AUDIT TRAIL",    icon: "⬡" },
+    { id: "memory",   label: "05  MEMORY  46K",    icon: "⬡" },
   ];
 
   return (
@@ -1110,8 +1565,12 @@ export default function App() {
           <ApprovalWorkflow ticket={selected} rca={rcaData}
             onComplete={null} />
         )}
-        {screen === "audit" && <AuditTrail />}
+        {screen === "audit"    && <AuditTrail />}
+        {screen === "memory"   && <MemoryBrowser />}
       </div>
+
+      {/* Floating ingest button — always visible */}
+      <IngestForm onIngested={() => {}} />
 
       {/* Status bar */}
       <div style={{

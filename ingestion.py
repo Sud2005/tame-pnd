@@ -33,7 +33,7 @@ except ImportError:
     print("⚠️  Phase 2: prediction.py not found")
 
 try:
-    from rca_engine import run_rca, add_to_index, build_index
+    from rca_engine import run_rca, add_to_index, build_index, prewarm_index
     RCA_ENABLED = True
     print("✅ Phase 3: RCA engine loaded")
 except ImportError:
@@ -47,12 +47,9 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 @app.on_event("startup")
 async def startup_event():
     if RCA_ENABLED:
-        try:
-            print("📥 Pre-loading FAISS index on startup...")
-            build_index()
-            print("✅ FAISS index ready")
-        except Exception as e:
-            print(f"⚠️  FAISS index not ready: {e}")
+        # Non-blocking prewarm: loads model + FAISS index in background thread
+        # API is immediately responsive while index loads (~10-20s first time)
+        prewarm_index()
 
 
 def get_db():
@@ -321,9 +318,38 @@ def get_rca_result(ticket_id: str):
                 "similarity_pct":   round(scores[i] * 100, 1) if i < len(scores) else 0,
             })
 
+    # Derive approval_path from stored data (column not in DB schema)
+    ticket_row = conn.execute("SELECT severity FROM tickets WHERE id=?", (ticket_id,)).fetchone()
+    sev = dict(ticket_row).get("severity", "P3") if ticket_row else "P3"
+    conf = int(result.get("confidence_score", 0) or 0)
+    risk = str(result.get("risk_tier", "Medium"))
+    if sev == "P1" or risk == "Critical" or (conf is not None and conf < 40):
+        approval_path = "C"
+    elif sev == "P3" and conf is not None and conf >= 75 and risk == "Low":
+        approval_path = "A"
+    elif conf is not None and conf >= 55:
+        approval_path = "B"
+    else:
+        approval_path = "C"
+
     conn.close()
     result["similar_incidents"] = similar_incidents
     result["similarity_scores"] = scores
+    result["approval_path"]     = approval_path
+    result["status"]            = result.get("status") or "success"
+
+    # Ensure fix_steps and pattern_match exist for frontend
+    if "fix_steps" not in result or not result["fix_steps"]:
+        fix = result.get("recommended_fix", "")
+        result["fix_steps"] = [fix] if fix else ["Review logs", "Identify root cause", "Apply fix"]
+    if isinstance(result.get("fix_steps"), str):
+        try:
+            result["fix_steps"] = json.loads(result["fix_steps"])
+        except Exception:
+            result["fix_steps"] = [result["fix_steps"]]
+    if "pattern_match" not in result:
+        result["pattern_match"] = ""
+
     return result
 
 
@@ -381,6 +407,90 @@ def rollback_ticket(ticket_id: str, body: RollbackRequest):
     return {"message": f"Ticket {ticket_id} rolled back to open.", "outcome": "rolled_back"}
 
 
+@app.get("/tickets/search")
+def search_tickets(
+    q:        str  = "",
+    severity: Optional[str] = None,
+    category: Optional[str] = None,
+    status:   Optional[str] = None,
+    limit:    int  = 100,
+    offset:   int  = 0,
+):
+    """
+    Full-text search across all 46,000 tickets.
+    Used by the Memory Browser screen to explore the full dataset.
+    No date filter — returns historical data too.
+    """
+    conn   = get_db()
+    query  = "SELECT * FROM tickets WHERE 1=1"
+    params = []
+
+    if q:
+        query += " AND (description LIKE ? OR resolution_notes LIKE ? OR id LIKE ?)"
+        like = f"%{q}%"
+        params += [like, like, like]
+    if severity:
+        query += " AND severity = ?"
+        params.append(severity.upper())
+    if category:
+        query += " AND category = ?"
+        params.append(category)
+    if status:
+        query += " AND status = ?"
+        params.append(status)
+
+    # Count query (same filters, no limit)
+    count_query  = query.replace("SELECT *", "SELECT COUNT(*)")
+    total        = conn.execute(count_query, params).fetchone()[0]
+
+    query += " ORDER BY opened_at DESC LIMIT ? OFFSET ?"
+    params += [limit, offset]
+
+    rows = conn.execute(query, params).fetchall()
+    conn.close()
+    return {
+        "tickets": [dict(r) for r in rows],
+        "total":   total,
+        "limit":   limit,
+        "offset":  offset,
+        "query":   q,
+    }
+
+
+@app.get("/tickets/overview")
+def tickets_overview():
+    """
+    Aggregate stats for the Memory Browser.
+    Shows breakdown of all 46,000 tickets by severity, category, status.
+    """
+    conn = get_db()
+    by_severity = conn.execute("""
+        SELECT severity, COUNT(*) as count FROM tickets GROUP BY severity ORDER BY severity
+    """).fetchall()
+    by_category = conn.execute("""
+        SELECT category, COUNT(*) as count FROM tickets GROUP BY category ORDER BY count DESC
+    """).fetchall()
+    by_status = conn.execute("""
+        SELECT status, COUNT(*) as count FROM tickets GROUP BY status ORDER BY count DESC
+    """).fetchall()
+    with_resolution = conn.execute("""
+        SELECT COUNT(*) FROM tickets
+        WHERE resolution_notes IS NOT NULL AND resolution_notes != ''
+        AND resolution_notes NOT IN ('nan','None','NaN')
+    """).fetchone()[0]
+    avg_mttr = conn.execute("""
+        SELECT ROUND(AVG(resolution_time_hrs), 2) FROM tickets
+        WHERE resolution_time_hrs IS NOT NULL AND resolution_time_hrs > 0
+    """).fetchone()[0]
+    conn.close()
+    return {
+        "by_severity":    [dict(r) for r in by_severity],
+        "by_category":    [dict(r) for r in by_category],
+        "by_status":      [dict(r) for r in by_status],
+        "with_resolution": with_resolution,
+        "avg_mttr_hrs":   avg_mttr,
+    }
+
 @app.get("/tickets/{ticket_id}/prediction")
 def get_prediction(ticket_id: str):
     conn = get_db()
@@ -396,9 +506,13 @@ def list_tickets(status: Optional[str]=None, severity: Optional[str]=None,
                  exclude_resolved: bool=False, limit: int=50, offset: int=0):
     conn = get_db(); q = "SELECT * FROM tickets WHERE 1=1"; params = []
     if exclude_resolved: q += " AND status != 'resolved'"
+    # Always exclude historical ITSM dataset tickets from the live feed
+    # These have created_at from when setup_db.py ran, not from live ingestion
+    # Only show tickets ingested in the last 30 days via the API
+    q += " AND opened_at LIKE '20%' AND opened_at >= datetime('now', '-30 days')"
     if status: q += " AND status=?"; params.append(status)
     if severity: q += " AND severity=?"; params.append(severity.upper())
-    q += " ORDER BY created_at DESC LIMIT ? OFFSET ?"; params += [limit, offset]
+    q += " ORDER BY opened_at DESC LIMIT ? OFFSET ?"; params += [limit, offset]
     rows  = conn.execute(q, params).fetchall()
     total = conn.execute("SELECT COUNT(*) FROM tickets").fetchone()[0]
     conn.close()
@@ -434,11 +548,30 @@ def get_stats():
     conn = get_db()
     s = {
         "total_tickets":    conn.execute("SELECT COUNT(*) FROM tickets").fetchone()[0],
-        "open_tickets":     conn.execute("SELECT COUNT(*) FROM tickets WHERE status='open'").fetchone()[0],
+        # Only count tickets ingested via the API (created_at is recent)
+        # Historical ITSM dataset tickets have opened_at in 2012-2014 but created_at from setup
+        # We count "open" as tickets that are genuinely actionable (not the 46k historical ones)
+        "open_tickets":     conn.execute("""
+            SELECT COUNT(*) FROM tickets
+            WHERE status = 'open'
+            AND opened_at LIKE '20%' AND opened_at >= datetime('now', '-30 days')
+        """).fetchone()[0],
         "pending_approval": conn.execute("SELECT COUNT(*) FROM tickets WHERE status='pending_approval'").fetchone()[0],
-        "resolved":         conn.execute("SELECT COUNT(*) FROM tickets WHERE status='resolved'").fetchone()[0],
-        "p1_open":          conn.execute("SELECT COUNT(*) FROM tickets WHERE severity='P1' AND status!='resolved'").fetchone()[0],
-        "p2_open":          conn.execute("SELECT COUNT(*) FROM tickets WHERE severity='P2' AND status!='resolved'").fetchone()[0],
+        "resolved":         conn.execute("""
+            SELECT COUNT(*) FROM tickets
+            WHERE status = 'resolved'
+            AND opened_at LIKE '20%' AND opened_at >= datetime('now', '-30 days')
+        """).fetchone()[0],
+        "p1_open":          conn.execute("""
+            SELECT COUNT(*) FROM tickets
+            WHERE severity='P1' AND status!='resolved'
+            AND opened_at LIKE '20%' AND opened_at >= datetime('now', '-30 days')
+        """).fetchone()[0],
+        "p2_open":          conn.execute("""
+            SELECT COUNT(*) FROM tickets
+            WHERE severity='P2' AND status!='resolved'
+            AND opened_at LIKE '20%' AND opened_at >= datetime('now', '-30 days')
+        """).fetchone()[0],
         "predictions_run":  conn.execute("SELECT COUNT(*) FROM predictions").fetchone()[0],
         "rca_completed":    conn.execute("SELECT COUNT(*) FROM rca_results").fetchone()[0],
         "audit_events":     conn.execute("SELECT COUNT(*) FROM audit_log").fetchone()[0],
