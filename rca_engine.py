@@ -143,7 +143,7 @@ def build_index(force_rebuild: bool = False) -> tuple:
     # Attempt 1: resolved tickets WITH resolution notes (ideal for RCA quality)
     rows = conn.execute("""
         SELECT id, description, severity, category, resolution_notes,
-               resolution_time_hrs, status, ci_cat, ci_subcat
+               status
         FROM   tickets
         WHERE  status = 'resolved'
           AND  resolution_notes IS NOT NULL
@@ -158,7 +158,7 @@ def build_index(force_rebuild: bool = False) -> tuple:
         print(f"   ⚠️  Too few with notes. Expanding to all resolved tickets...")
         rows = conn.execute("""
             SELECT id, description, severity, category, resolution_notes,
-                   resolution_time_hrs, status, ci_cat, ci_subcat
+                   status
             FROM   tickets
             WHERE  status = 'resolved'
             ORDER  BY opened_at DESC
@@ -171,7 +171,7 @@ def build_index(force_rebuild: bool = False) -> tuple:
         print(f"   ⚠️  Not enough resolved. Including all tickets...")
         rows = conn.execute("""
             SELECT id, description, severity, category, resolution_notes,
-                   resolution_time_hrs, status, ci_cat, ci_subcat
+                   status
             FROM   tickets
             ORDER  BY opened_at DESC
             LIMIT  50000
@@ -284,24 +284,24 @@ def calibrate_confidence(raw_confidence: int, similar: list[dict], ticket: dict)
         return max(10, raw_confidence // 2)
 
     # 1. Average similarity of top matches (0-100 scale)
-    avg_sim = np.mean([s.get("similarity_pct", 0) for s in similar[:3]])
+    avg_sim = float(np.mean([s.get("similarity_pct", 0) for s in similar[:3]]))
 
     # 2. Resolution coverage — how many matches have actual fixes recorded
     has_resolution = sum(
         1 for s in similar[:3]
         if s.get("resolution_notes") and str(s["resolution_notes"]).lower() not in ("nan", "none", "")
     )
-    resolution_bonus = has_resolution * 8  # up to +24 for 3 matches with resolutions
+    resolution_bonus = has_resolution * 10  # up to +30 for 3 matches with resolutions
 
     # 3. Severity match bonus — same severity = better pattern
     ticket_sev = ticket.get("severity", "P3")
     sev_matches = sum(1 for s in similar[:3] if s.get("severity") == ticket_sev)
-    sev_bonus = sev_matches * 5  # up to +15
+    sev_bonus = sev_matches * 6  # up to +18
 
     # 4. Category match bonus
     ticket_cat = ticket.get("category", "General")
     cat_matches = sum(1 for s in similar[:3] if s.get("category") == ticket_cat)
-    cat_bonus = cat_matches * 4  # up to +12
+    cat_bonus = cat_matches * 5  # up to +15
 
     # 5. Historical fix outcomes for this category
     outcome_multiplier = 1.0
@@ -315,25 +315,31 @@ def calibrate_confidence(raw_confidence: int, similar: list[dict], ticket: dict)
         conn.close()
         if outcome and outcome["total_actions"] > 0:
             success_rate = outcome["success_count"] / outcome["total_actions"]
-            outcome_multiplier = 0.7 + (success_rate * 0.3)  # range 0.7-1.0
+            outcome_multiplier = 0.8 + (success_rate * 0.2)  # range 0.8-1.0
     except Exception:
         pass
 
-    # Blend: 40% LLM confidence + 35% similarity + 25% bonuses
+    # Blend: 35% LLM confidence + 40% similarity + 25% bonuses
+    # Similarity weighted higher because we have 46k real tickets in the index
     blended = (
-        raw_confidence * 0.40 +
-        avg_sim * 0.35 +
+        raw_confidence * 0.35 +
+        avg_sim * 0.40 +
         (resolution_bonus + sev_bonus + cat_bonus) * 0.25
     )
     calibrated = int(blended * outcome_multiplier)
 
-    # Clamp to reasonable range — never show 0% if we have data
-    if similar and avg_sim > 30:
-        calibrated = max(calibrated, 25)
-    if similar and avg_sim > 60:
-        calibrated = max(calibrated, 45)
+    # Confidence floors based on match quality
+    # With 46k tickets in the index, high similarity really means something
+    if similar and avg_sim > 40:
+        calibrated = max(calibrated, 35)
+    if similar and avg_sim > 55:
+        calibrated = max(calibrated, 50)
+    if similar and avg_sim > 70:
+        calibrated = max(calibrated, 62)
+    if similar and avg_sim > 80 and has_resolution >= 2:
+        calibrated = max(calibrated, 75)
 
-    return max(5, min(95, calibrated))
+    return max(10, min(95, calibrated))
 
 
 def determine_risk_tier(confidence: int, severity: str, similar: list[dict]) -> str:
