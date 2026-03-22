@@ -205,10 +205,8 @@ function TicketFeed({ onSelectTicket, selected }) {
   const visible = tickets; // filtering done server-side via API params
 
   const statCards = [
-    { label: "TOTAL",    val: stats.total_tickets   || 0, color: COLORS.accent },
     { label: "OPEN",     val: stats.open_tickets    || 0, color: COLORS.p2 },
-    { label: "P1 OPEN",  val: stats.p1_open         || 0, color: COLORS.p1 },
-    { label: "PENDING",  val: stats.pending_approval|| 0, color: COLORS.p2 },
+    { label: "PENDING",  val: stats.pending_approval|| 0, color: COLORS.accent },
     { label: "RESOLVED", val: stats.resolved        || 0, color: COLORS.p3 },
     { label: "RCA DONE", val: stats.rca_completed   || 0, color: COLORS.accent },
   ];
@@ -216,7 +214,7 @@ function TicketFeed({ onSelectTicket, selected }) {
   return (
     <div style={{ height: "100%", display: "flex", flexDirection: "column", gap: 16, padding: 24, overflow: "hidden" }}>
       {/* Stat strip */}
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(6,1fr)", gap: 10 }}>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 10 }}>
         {statCards.map(s => (
           <Card key={s.label} style={{ padding: "12px 14px" }}>
             <div className="mono" style={{ fontSize: 9, color: COLORS.textDim, letterSpacing: "0.1em" }}>{s.label}</div>
@@ -520,7 +518,7 @@ function RCADetail({ ticket, onApprove }) {
           )}
 
           {/* Proceed to approval */}
-          <button onClick={() => onApprove(ticket, rca)} style={{
+          <button onClick={() => onApprove(ticket, rca, pred)} style={{
             width: "100%", padding: "14px", background: riskColor,
             color: COLORS.bg, border: "none", borderRadius: 8, fontSize: 14,
             fontWeight: 800, cursor: "pointer", fontFamily: "inherit",
@@ -535,7 +533,7 @@ function RCADetail({ ticket, onApprove }) {
 }
 
 // ── Screen 3: Approval Workflow ───────────────────────────────────────────────
-function ApprovalWorkflow({ ticket, rca, onComplete }) {
+function ApprovalWorkflow({ ticket, rca, pred, onComplete }) {
   const [reason, setReason] = useState("");
   const [loading, setLoading] = useState(false);
   const [result, setResult]   = useState(null);
@@ -550,16 +548,19 @@ function ApprovalWorkflow({ ticket, rca, onComplete }) {
     </div>
   );
 
-  const conf      = rca?.confidence_score || 50;
-  const risk      = rca?.risk_tier || "Medium";
+  // Use prediction confidence if available — same value shown in RCA Overview
+  const conf      = pred?.confidence_score ?? rca?.confidence_score ?? 50;
+  const risk      = pred?.risk_tier || rca?.risk_tier || "Medium";
 
-  // Priority: use backend-calculated path if available
-  // Backend accounts for history, calibration, and severity correctly
-  const storedPath = rca?.approval_path;
+  // Priority: use backend-calculated path from prediction (most accurate)
+  // Falls back to rca path, then client-side heuristic
+  const storedPath = pred?.approval_path || rca?.approval_path;
   const path = storedPath || (
     ticket.severity === "P1"                          ? "C" :
-    ticket.severity === "P3" && risk === "Low"        ? "A" :
-    ticket.severity === "P3" && conf >= 82            ? "A" :
+    ticket.severity === "P3" && risk === "Low" && conf >= 75 ? "A" :
+    ticket.severity === "P3" && conf >= 65            ? "B" :
+    ticket.severity === "P2" && conf >= 60            ? "B" :
+    conf < 40                                         ? "C" :
     "B"
   );
   const riskColor = RISK_COLOR[risk] || COLORS.textDim;
@@ -1029,6 +1030,7 @@ function MemoryBrowser() {
   const [catFilter,setCatFilter]  = useState("");
   const [statFilter,setStatFilter]= useState("");
   const [offset,   setOffset]     = useState(0);
+  const [solutionTicket, setSolutionTicket] = useState(null);
   const PAGE = 100;
 
   // Load overview stats once
@@ -1226,7 +1228,7 @@ function MemoryBrowser() {
         <table style={{ width:"100%", borderCollapse:"collapse", fontSize:12 }}>
           <thead>
             <tr style={{ position:"sticky", top:0, background:COLORS.surface }}>
-              {["TICKET ID","SEVERITY","CATEGORY","DESCRIPTION","RESOLUTION","MTTR","STATUS"].map(h=>(
+              {["TICKET ID","SEVERITY","CATEGORY","DESCRIPTION","RESOLUTION","MTTR","STATUS","SOLUTION"].map(h=>(
                 <th key={h} className="mono" style={{
                   padding:"8px 10px", textAlign:"left", fontSize:9,
                   color:COLORS.textDim, letterSpacing:"0.08em",
@@ -1273,12 +1275,74 @@ function MemoryBrowser() {
                       t.status==="pending_approval"?"#00D4FF":COLORS.textDim
                     } />
                   </td>
+                  <td style={{ padding:"8px 10px", whiteSpace:"nowrap" }}>
+                    {hasResolution ? (
+                      <button onClick={() => setSolutionTicket(t)} style={{
+                        padding:"3px 10px", background:COLORS.p3+"22", color:COLORS.p3,
+                        border:`1px solid ${COLORS.p3}44`, borderRadius:4,
+                        fontSize:10, fontWeight:700, cursor:"pointer", fontFamily:"inherit",
+                      }}>View</button>
+                    ) : (
+                      <span style={{ fontSize:10, color:COLORS.border }}>—</span>
+                    )}
+                  </td>
                 </tr>
               );
             })}
           </tbody>
         </table>
       </div>
+
+      {/* Solution floating modal */}
+      {solutionTicket && (
+        <div onClick={() => setSolutionTicket(null)} style={{
+          position:"fixed", inset:0, background:"rgba(0,0,0,0.8)",
+          zIndex:300, display:"flex", alignItems:"center", justifyContent:"center",
+          animation:"fade-in 0.2s ease",
+        }}>
+          <div onClick={e=>e.stopPropagation()} style={{
+            width:520, maxHeight:"80vh", background:COLORS.card,
+            border:`1px solid ${COLORS.border}`, borderRadius:12,
+            padding:28, animation:"slide-in 0.25s ease", overflowY:"auto",
+          }}>
+            <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", marginBottom:16 }}>
+              <div>
+                <div style={{ fontSize:14, fontWeight:800 }}>Solution</div>
+                <div className="mono" style={{ fontSize:10, color:COLORS.accent, marginTop:2 }}>
+                  {solutionTicket.id}
+                </div>
+              </div>
+              <button onClick={()=>setSolutionTicket(null)} style={{
+                background:"none", border:"none", color:COLORS.textDim,
+                cursor:"pointer", fontSize:16, padding:"2px 6px",
+              }}>✕</button>
+            </div>
+            <div style={{ display:"flex", gap:8, flexWrap:"wrap", marginBottom:14 }}>
+              <Badge label={solutionTicket.severity||"?"} color={SEV_COLOR[solutionTicket.severity]||COLORS.textDim} dim={SEV_DIM[solutionTicket.severity]} />
+              <Badge label={solutionTicket.category||"General"} color={COLORS.textDim} />
+              <Badge label="APPROVED" color={COLORS.p3} />
+            </div>
+            <div style={{ fontSize:12, color:COLORS.textDim, marginBottom:12, lineHeight:1.6 }}>
+              {solutionTicket.description}
+            </div>
+            <div style={{ fontSize:10, color:COLORS.textDim, letterSpacing:"0.1em", marginBottom:8 }}>
+              RESOLUTION / SOLUTION
+            </div>
+            <div style={{
+              padding:"14px 16px", background:COLORS.p3+"15",
+              border:`1px solid ${COLORS.p3}33`, borderRadius:8,
+              fontSize:13, color:COLORS.p3, lineHeight:1.7,
+            }}>
+              {solutionTicket.resolution_notes}
+            </div>
+            {solutionTicket.resolution_time_hrs && (
+              <div className="mono" style={{ fontSize:10, color:COLORS.textDim, marginTop:10 }}>
+                Resolution time: {solutionTicket.resolution_time_hrs}h
+              </div>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -1300,15 +1364,36 @@ function IngestForm({ onIngested }) {
     { label: "🔴 P1 — Auth Down",
       data: { description: "Authentication service returning 500 errors, login requests rejected for all tenants",
               severity: "P1", ci_cat: "application", urgency: "1", impact: "1", alert_status: "True" } },
+    { label: "🔴 P1 — Network Down",
+      data: { description: "Core network switch failure causing complete loss of connectivity across all offices",
+              severity: "P1", ci_cat: "network", urgency: "1", impact: "1", alert_status: "True" } },
+    { label: "🔴 P1 — Security Breach",
+      data: { description: "Unauthorized access detected on production database, potential data exfiltration in progress",
+              severity: "P1", ci_cat: "application", urgency: "1", impact: "1", alert_status: "True" } },
     { label: "🟡 P2 — App Slow",
       data: { description: "Web application response times elevated to 8 seconds, subset of users affected",
               severity: "P2", ci_cat: "subapplication", urgency: "2", impact: "2", alert_status: "False" } },
     { label: "🟡 P2 — DB Lag",
       data: { description: "Database replication lag increasing on secondary node, reads becoming stale",
               severity: "P2", ci_cat: "storage", urgency: "2", impact: "3", alert_status: "False" } },
+    { label: "🟡 P2 — High CPU",
+      data: { description: "Application server CPU usage sustained above 90% for 30 minutes causing degraded performance",
+              severity: "P2", ci_cat: "subapplication", urgency: "2", impact: "2", alert_status: "False" } },
+    { label: "🟡 P2 — Disk Full",
+      data: { description: "Primary log disk on production server at 95% capacity, writes will fail when full",
+              severity: "P2", ci_cat: "storage", urgency: "2", impact: "2", alert_status: "True" } },
+    { label: "🟡 P2 — VPN Issues",
+      data: { description: "Remote VPN service intermittent, affecting remote workforce connectivity",
+              severity: "P2", ci_cat: "network", urgency: "2", impact: "3", alert_status: "False" } },
     { label: "🟢 P3 — Certificate",
       data: { description: "SSL certificate on internal reporting dashboard expiring in 14 days, renewal needed",
               severity: "P3", ci_cat: "", urgency: "4", impact: "4", alert_status: "False" } },
+    { label: "🟢 P3 — Patch Due",
+      data: { description: "Security patch MS-2024-0421 available for critical OS vulnerability, scheduled maintenance required",
+              severity: "P3", ci_cat: "", urgency: "3", impact: "3", alert_status: "False" } },
+    { label: "🟢 P3 — Account Lock",
+      data: { description: "Single user account locked out after failed password attempts, requires manual unlock",
+              severity: "P3", ci_cat: "application", urgency: "4", impact: "4", alert_status: "False" } },
   ];
 
   async function submit() {
@@ -1465,6 +1550,7 @@ export default function App() {
   const [screen, setScreen]   = useState("feed");
   const [selected, setSelected] = useState(null);
   const [rcaData, setRcaData]   = useState(null);
+  const [predData, setPredData] = useState(null);
   const [apiOk, setApiOk]       = useState(null);
 
   useEffect(() => {
@@ -1489,9 +1575,10 @@ export default function App() {
     setScreen("rca");
   }
 
-  function handleApprove(ticket, rca) {
+  function handleApprove(ticket, rca, pred) {
     setSelected(ticket);
     setRcaData(rca);
+    setPredData(pred || null);
     setScreen("approval");
   }
 
@@ -1500,7 +1587,7 @@ export default function App() {
     { id: "rca",      label: "02  RCA DETAIL",     icon: "⬡" },
     { id: "approval", label: "03  APPROVAL",       icon: "⬡" },
     { id: "audit",    label: "04  AUDIT TRAIL",    icon: "⬡" },
-    { id: "memory",   label: "05  MEMORY  46K",    icon: "⬡" },
+    { id: "memory",   label: "05  MEMORY",          icon: "⬡" },
   ];
 
   return (
@@ -1562,7 +1649,7 @@ export default function App() {
           <RCADetail ticket={selected} onApprove={handleApprove} />
         )}
         {screen === "approval" && (
-          <ApprovalWorkflow ticket={selected} rca={rcaData}
+          <ApprovalWorkflow ticket={selected} rca={rcaData} pred={predData}
             onComplete={null} />
         )}
         {screen === "audit"    && <AuditTrail />}

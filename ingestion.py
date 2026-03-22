@@ -323,14 +323,22 @@ def get_rca_result(ticket_id: str):
     sev = dict(ticket_row).get("severity", "P3") if ticket_row else "P3"
     conf = int(result.get("confidence_score", 0) or 0)
     risk = str(result.get("risk_tier", "Medium"))
-    if sev == "P1" or risk == "Critical" or (conf is not None and conf < 40):
+    if sev == "P1":
         approval_path = "C"
-    elif sev == "P3" and conf is not None and conf >= 75 and risk == "Low":
+    elif risk == "Critical" and conf < 70:
+        approval_path = "C"
+    elif conf < 40:
+        approval_path = "C"
+    elif sev == "P3" and risk == "Low" and conf >= 75:
         approval_path = "A"
-    elif conf is not None and conf >= 55:
+    elif sev == "P3" and conf >= 65:
         approval_path = "B"
-    else:
+    elif sev == "P2" and conf >= 60:
+        approval_path = "B"
+    elif sev == "P2":
         approval_path = "C"
+    else:
+        approval_path = "B"
 
     conn.close()
     result["similar_incidents"] = similar_incidents
@@ -496,9 +504,37 @@ def get_prediction(ticket_id: str):
     conn = get_db()
     row  = conn.execute("SELECT * FROM predictions WHERE ticket_id=? ORDER BY created_at DESC LIMIT 1",
                         (ticket_id,)).fetchone()
+    if not row:
+        conn.close()
+        return {"ticket_id": ticket_id, "status": "pending", "message": "Retry in 3s."}
+    result = dict(row)
+
+    # Derive approval_path from prediction data (not stored in DB)
+    ticket_row = conn.execute("SELECT severity FROM tickets WHERE id=?", (ticket_id,)).fetchone()
+    sev  = dict(ticket_row).get("severity", "P3") if ticket_row else "P3"
     conn.close()
-    if not row: return {"ticket_id": ticket_id, "status": "pending", "message": "Retry in 3s."}
-    return dict(row)
+    conf = int(result.get("confidence_score") or 0)
+    risk = str(result.get("risk_tier") or "Medium")
+
+    if sev == "P1":
+        approval_path = "C"
+    elif risk == "Critical" and conf < 70:
+        approval_path = "C"
+    elif conf < 40:
+        approval_path = "C"
+    elif sev == "P3" and risk == "Low" and conf >= 75:
+        approval_path = "A"
+    elif sev == "P3" and conf >= 65:
+        approval_path = "B"
+    elif sev == "P2" and conf >= 60:
+        approval_path = "B"
+    elif sev == "P2":
+        approval_path = "C"
+    else:
+        approval_path = "B"
+
+    result["approval_path"] = approval_path
+    return result
 
 
 @app.get("/tickets")
