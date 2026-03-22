@@ -68,10 +68,21 @@ def test_direct():
         check("Index builds successfully",  True)
         check("Has vectors",                index.ntotal > 0,         str(index.ntotal))
         check("Store matches index size",   len(store) == index.ntotal)
-        # Validate full ITSM corpus when available; otherwise treat as environment-limited
-        large_ok = index.ntotal >= 46000
-        check("Large historical index loaded (46k+) OR environment-limited", large_ok or index.ntotal > 0,
-              f"{index.ntotal:,} vectors")
+        try:
+            import sqlite3
+            conn = sqlite3.connect("db/opsai.db")
+            expected = conn.execute(
+                "SELECT COUNT(*) FROM tickets WHERE status='resolved'"
+            ).fetchone()[0]
+            conn.close()
+            if expected >= 46000:
+                check("Large historical index loaded (46k+)", index.ntotal >= 46000,
+                      f"{index.ntotal:,} vectors")
+            else:
+                check("Index covers resolved ticket set", index.ntotal == expected,
+                      f"{index.ntotal:,}/{expected:,}")
+        except Exception as e:
+            check("Large index validation skipped", True, str(e)[:60])
         check("Minimum viable memory",      index.ntotal >= 5,        f"{index.ntotal} vectors")
         print(f"\n     📊 Index size: {index.ntotal:,} resolved tickets in memory")
     except Exception as e:

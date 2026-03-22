@@ -261,9 +261,7 @@ def search_similar(description: str, k: int = 5) -> list[dict]:
 
     results = []
     for score, idx in zip(scores[0], indices[0]):
-        if idx == -1:
-            continue
-        if idx >= len(store):
+        if idx == -1 or idx >= len(store):
             continue
         ticket = store[idx].copy()
         # Cosine similarity is in [-1, 1] after L2 norm; clamp to [0, 1]
@@ -288,7 +286,7 @@ def calibrate_confidence(raw_confidence: int, similar: list[dict], ticket: dict)
     Returns adjusted confidence score 15-95.
     """
     if not similar:
-        return max(35, min(95, raw_confidence))
+        return max(15, min(95, raw_confidence))
 
     # 1. Average similarity of top matches (0-100 scale)
     avg_sim = np.mean([s.get("similarity_pct", 0) for s in similar[:3]])
