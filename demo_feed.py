@@ -102,8 +102,8 @@ def prepare_demo_tickets(csv_path: str, severity_filter=None) -> list:
 def main():
     global API_BASE
     parser = argparse.ArgumentParser(description="Demo ticket feed")
-    parser.add_argument("--input",    default="ITSM_data.csv")
-    parser.add_argument("--interval", type=float, default=3.0,
+    parser.add_argument("--input",    default="data/demo_tickets.csv")
+    parser.add_argument("--interval", type=float, default=2.0,
                         help="Seconds between tickets (0 for instant)")
     parser.add_argument("--severity", default=None,
                         help="Filter by severity: P1, P2, P3")

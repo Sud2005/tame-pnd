@@ -197,7 +197,7 @@ def main():
     tickets = [generate_ticket(i + 1) for i in range(args.count)]
 
     fieldnames = tickets[0].keys()
-    with open(args.output, "w", newline="") as f:
+    with open(args.output, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(tickets)

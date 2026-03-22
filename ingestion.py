@@ -155,7 +155,6 @@ def run_keyword_analysis(description: str, explicit_severity: str = None) -> dic
             flags.append(f"SECURITY: '{phrase}'")
             suggested = "P1"
             break
-
     return {"flags": flags, "suggested_severity": suggested, "anomaly_detected": bool(flags)}
 
 
@@ -325,20 +324,18 @@ def get_rca_result(ticket_id: str):
     risk = str(result.get("risk_tier", "Medium"))
     if sev == "P1":
         approval_path = "C"
-    elif risk == "Critical" and conf < 70:
-        approval_path = "C"
+    elif sev == "P3" and conf >= 70:
+        approval_path = "A"
+    elif sev == "P2" and conf >= 85 and risk != "Critical":
+        approval_path = "A"
+    elif sev == "P3" and conf >= 40:
+        approval_path = "B"
+    elif sev == "P2" and conf >= 50:
+        approval_path = "B"
     elif conf < 40:
         approval_path = "C"
-    elif sev == "P3" and risk == "Low" and conf >= 75:
-        approval_path = "A"
-    elif sev == "P3" and conf >= 65:
-        approval_path = "B"
-    elif sev == "P2" and conf >= 60:
-        approval_path = "B"
-    elif sev == "P2":
-        approval_path = "C"
     else:
-        approval_path = "B"
+        approval_path = "C"
 
     conn.close()
     result["similar_incidents"] = similar_incidents
@@ -518,20 +515,18 @@ def get_prediction(ticket_id: str):
 
     if sev == "P1":
         approval_path = "C"
-    elif risk == "Critical" and conf < 70:
-        approval_path = "C"
+    elif sev == "P3" and conf >= 70:
+        approval_path = "A"
+    elif sev == "P2" and conf >= 85 and risk != "Critical":
+        approval_path = "A"
+    elif sev == "P3" and conf >= 40:
+        approval_path = "B"
+    elif sev == "P2" and conf >= 50:
+        approval_path = "B"
     elif conf < 40:
         approval_path = "C"
-    elif sev == "P3" and risk == "Low" and conf >= 75:
-        approval_path = "A"
-    elif sev == "P3" and conf >= 65:
-        approval_path = "B"
-    elif sev == "P2" and conf >= 60:
-        approval_path = "B"
-    elif sev == "P2":
-        approval_path = "C"
     else:
-        approval_path = "B"
+        approval_path = "C"
 
     result["approval_path"] = approval_path
     return result

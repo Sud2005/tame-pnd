@@ -85,7 +85,7 @@ def calculate_mttr(opened, resolved):
 
 
 def infer_description(row, col_map, all_cols):
-   ci_name   = _get(row, col_map, "description", "")
+    ci_name   = _get(row, col_map, "description", "")
     ci_cat    = _get(row, col_map, "ci_cat", "")
     ci_subcat = _get(row, col_map, "ci_subcat", "")
     urgency   = _get(row, col_map, "urgency", "")

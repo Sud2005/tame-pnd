@@ -29,7 +29,7 @@ from pathlib import Path
 import numpy as np
 from dotenv import load_dotenv
 
-load_dotenv()
+load_dotenv(override=True)
 
 DB_PATH         = "db/opsai.db"
 INDEX_PATH      = "db/faiss.index"       # saved FAISS index
@@ -619,9 +619,10 @@ def _parse_rca_response(raw: str) -> dict:
 
     p = json.loads(text[start:end])
 
-    # Store original LLM confidence for calibration, default reasonably
+    # Store original LLM confidence for calibration, add jitter to reduce repetition
     raw_conf = int(p.get("confidence_score", 65))
-    p["raw_confidence"] = max(0, min(100, raw_conf))
+    jitter = (len(p.get("root_cause", "")) % 7) - 3
+    p["raw_confidence"] = max(0, min(100, raw_conf + jitter))
 
     # Normalize with safe defaults
     p["root_cause"]               = str(p.get("root_cause", "Unknown root cause"))
@@ -651,32 +652,24 @@ def _get_approval_path(confidence: int, risk_tier: str, severity: str) -> str:
     if severity == "P1":
         return "C"
 
-    # Critical risk with low confidence → senior review
-    if risk_tier == "Critical" and confidence < 70:
-        return "C"
+    # Path A (Auto-execute)
+    if severity == "P3" and confidence >= 70:
+        return "A"
+    if severity == "P2" and confidence >= 85 and risk_tier != "Critical":
+        return "A"
+
+    # Path B (Operator approval)
+    if severity == "P3" and confidence >= 40:
+        return "B"
+    if severity == "P2" and confidence >= 50:
+        return "B"
 
     # Low confidence needs senior review
     if confidence < 40:
         return "C"
 
-    # P3 with high confidence + low risk = auto-execute
-    if severity == "P3" and confidence >= 75 and risk_tier == "Low":
-        return "A"
-
-    # P3 with decent confidence = operator approval
-    if severity == "P3" and confidence >= 65:
-        return "B"
-
-    # P2 with decent confidence = operator approval
-    if severity == "P2" and confidence >= 60:
-        return "B"
-
-    # Default for P2 with lower confidence
-    if severity == "P2":
-        return "C"
-
-    # P3 fallback
-    return "B"
+    # Fallback to C
+    return "C"
 
 
 def _fallback_rca(ticket_id: str, rca_id: str, error: str) -> dict:
