@@ -150,7 +150,7 @@ def build_prompt(description: str, ci_cat: str, ci_subcat: str,
 
     context_block = "\n".join(context_parts) if context_parts else "No additional context"
 
-    return f"""You are a senior IT operations analyst. Classify this ITSM incident ticket.
+    return f"""You are a senior IT operations analyst. Classify this ITSM incident ticket accurately.
 
 TICKET CONTEXT:
 {context_block}
@@ -158,15 +158,25 @@ TICKET CONTEXT:
 TICKET DESCRIPTION:
 {description}
 
-Rules:
-- P1 = Production impact, all users affected, data loss risk, complete outage, security breach
-- P2 = Partial service degradation, subset of users affected, workaround possible
-- P3 = Minor issue, low business impact, can be scheduled
-- Critical risk = P1 severity OR confidence below 65 OR security-related
-- Medium risk   = P2 OR confidence 65-84
-- Low risk      = P3 AND confidence >= 85
+SEVERITY RULES (pick exactly one):
+- P1 = Production down, ALL users affected, data loss risk, complete outage, active security breach
+- P2 = Partial degradation, SOME users affected, service slow or intermittent, workaround exists
+- P3 = Single user, cosmetic issue, scheduled maintenance, low business impact, can wait
 
-Respond ONLY with valid JSON. No markdown. No explanation. No extra text.
+RISK TIER RULES (must match severity):
+- Critical = P1 tickets only, OR any ticket with confirmed security breach or data exposure
+- Medium   = P2 tickets, OR P3 tickets where the fix has side effects or requires service restart
+- Low      = P3 tickets with safe, reversible fixes (certificate renewal, config change, cache clear)
+
+CONFIDENCE RULES:
+- Give 85-95 when description clearly matches one category and fix is obvious
+- Give 70-84 when description is clear but fix has some uncertainty  
+- Give 55-69 when description is vague or could mean multiple things
+- Give below 55 only when you genuinely cannot classify
+
+CRITICAL: Do NOT assign Critical risk to P2 or P3 tickets. Match risk tier to severity.
+
+Respond ONLY with valid JSON. No markdown. No preamble. No extra text.
 
 {{
   "severity": "P1 or P2 or P3",
@@ -175,8 +185,8 @@ Respond ONLY with valid JSON. No markdown. No explanation. No extra text.
   "anomaly_flagged": true or false,
   "confidence_score": integer 0-100,
   "risk_tier": "Low or Medium or Critical",
-  "recommended_fix": "one concrete action to take first",
-  "reasoning": "one sentence explaining severity decision"
+  "recommended_fix": "one concrete first action",
+  "reasoning": "one sentence explaining severity and risk tier choice"
 }}"""
 
 
@@ -223,15 +233,15 @@ def parse_response(raw: str) -> dict:
 
 # ── Trust calibration: adjusts raw LLM confidence with outcome history ────────
 
-def calibrate_confidence(raw: int, category: str, severity: str, conn,
-                         has_rich_description: bool = False) -> int:
+def calibrate_confidence(raw: int, category: str, severity: str, conn) -> int:
     """
     Adjusts confidence using historical fix outcome data from DB.
-    Rich descriptions (manual/preset) → trust Groq more (0.85×)
-    Weak descriptions (ITSM CSV IDs)  → deflate more (0.70×)
+    No history   → trust Groq score but deflate slightly (no hardcoded floor)
     Good history → blend LLM score with historical accuracy
-    Rollbacks → penalise heavily (-10 per rollback)
-    P1 → always cap at 80 (human always involved)
+    Rollbacks    → penalise (-10 per rollback)
+    P1           → cap at 80 so human always involved
+    P2           → cap at 90, allow Path B
+    P3           → no cap, allow Path A if score is high enough
     """
     rows = conn.execute("""
         SELECT approve_count, reject_count, rollback_count, total_actions
@@ -241,25 +251,23 @@ def calibrate_confidence(raw: int, category: str, severity: str, conn,
     total_history = sum(r[3] for r in rows) if rows else 0
 
     if total_history < 5:
-        # Scale deflation by description quality
-        # Rich descriptions (manual/preset) → Groq had real signal, trust it
-        # Weak descriptions (ITSM CSV device IDs) → Groq guessed, deflate more
-        factor = 0.85 if has_rich_description else 0.70
-        deflated = int(raw * factor)
-        if severity == "P1": return min(deflated, 80)
-        return max(35, deflated)  # Floor at 35 — never go absurdly low
+        # No history — trust Groq but deflate by 20% to be conservative
+        # DO NOT hardcode 55 — that sends everything to Path C
+        calibrated = int(raw * 0.80)
+    else:
+        total_approvals  = sum(r[0] for r in rows)
+        total_actions    = sum(r[3] for r in rows)
+        total_rollbacks  = sum(r[2] for r in rows)
+        hist_accuracy    = total_approvals / total_actions
+        rollback_penalty = total_rollbacks * 10
+        calibrated = int((raw * 0.4) + (hist_accuracy * 100 * 0.6) - rollback_penalty)
 
-    total_approvals = sum(r[0] for r in rows)
-    total_actions   = sum(r[3] for r in rows)
-    total_rollbacks = sum(r[2] for r in rows)
-
-    hist_accuracy   = total_approvals / total_actions
-    rollback_penalty = total_rollbacks * 10
-
-    calibrated = int((raw * 0.4) + (hist_accuracy * 100 * 0.6) - rollback_penalty)
-
+    # Severity-based caps — P1 always needs human, P2/P3 can auto-route
     if severity == "P1":
-        calibrated = min(calibrated, 80)  # P1 always needs human eyes
+        calibrated = min(calibrated, 80)   # P1 max 80% → always Path C or B
+    elif severity == "P2":
+        calibrated = min(calibrated, 90)   # P2 max 90% → Path B or A
+    # P3 uncapped → can reach Path A if Groq is confident
 
     return max(0, min(100, calibrated))
 
@@ -268,15 +276,36 @@ def calibrate_confidence(raw: int, category: str, severity: str, conn,
 
 def get_approval_path(confidence: int, risk_tier: str, severity: str) -> str:
     """
-    A = Auto-execute with 10s cancel window (low risk, high confidence)
-    B = Single operator approve/reject
-    C = Mandatory senior review + written justification
+    Path A = Auto-execute (10s cancel window) — P3, low risk, high confidence
+    Path B = Single operator approve/reject — P2 or medium confidence
+    Path C = Mandatory senior review — P1 always, or critical+low confidence
+
+    Key fix: Critical risk alone no longer forces Path C if confidence >= 70.
+    This prevents P2 tickets from always landing in Path C just because
+    Groq returns risk_tier=Critical with decent confidence.
     """
-    if severity == "P1" or risk_tier == "Critical":
+    # P1 is always Path C — non-negotiable
+    if severity == "P1":
         return "C"
-    if risk_tier == "Medium" or confidence < 85:
+
+    # Critical risk: only force C when confidence is also low
+    if risk_tier == "Critical":
+        return "C" if confidence < 70 else "B"
+
+    # P3 with high confidence and explicitly low risk → auto-execute
+    if severity == "P3" and risk_tier == "Low" and confidence >= 82:
+        return "A"
+
+    # P2 or medium risk → single operator approval
+    if severity == "P2" or risk_tier == "Medium":
         return "B"
-    return "A"
+
+    # P3 with decent confidence → single approval
+    if confidence >= 65:
+        return "B"
+
+    # Low confidence → require review
+    return "C"
 
 
 # ── Keyword fallback (if Groq is down or key missing) ────────────────────────
@@ -343,12 +372,6 @@ def predict_ticket(
     # ── Layer 1: Keyword analysis (always runs, no API) ───────────────────────
     kw_analysis = run_keyword_analysis(description, ci_cat, alert_status)
 
-    # Determine if description is "rich" (manual/preset with real English text)
-    # vs "weak" (ITSM CSV device IDs like "WBA000058")
-    # Rich descriptions have >40 chars and contain spaces between words
-    word_count = len(description.split())
-    has_rich_desc = len(description) > 40 and word_count > 5
-
     result = None
 
     try:
@@ -384,24 +407,9 @@ def predict_ticket(
             final_sev = kw_sev
             parsed["reasoning"] += f" (escalated by keyword: {kw_analysis['flags'][0]})"
 
-        # Also use urgency/impact signals to override weak Groq classification
-        if urgency in ("1", "1.0") and impact in ("1", "1.0") and final_sev != "P1":
-            final_sev = "P1"
-            parsed["reasoning"] += " (escalated: urgency=1 + impact=1)"
-        elif urgency in ("1", "2", "1.0", "2.0") and final_sev == "P3":
-            final_sev = "P2"
-            parsed["reasoning"] += f" (escalated: urgency={urgency})"
-
-        # Recalculate risk_tier to match final severity
-        if final_sev == "P1":
-            parsed["risk_tier"] = "Critical"
-        elif final_sev == "P2" and parsed["risk_tier"] == "Low":
-            parsed["risk_tier"] = "Medium"
-
         # ── Layer 3: Trust calibration ─────────────────────────────────────────
         calibrated = calibrate_confidence(
-            parsed["confidence_score"], parsed["category"], final_sev, conn,
-            has_rich_description=has_rich_desc
+            parsed["confidence_score"], parsed["category"], final_sev, conn
         )
 
         # ── Layer 4: Approval path ─────────────────────────────────────────────

@@ -139,25 +139,54 @@ def build_index(force_rebuild: bool = False) -> tuple:
         print(f"   ✅ Index loaded: {index.ntotal:,} vectors")
         return index, store
 
-    print("🔨 Building FAISS index from resolved tickets...")
+    print("🔨 Building FAISS index...")
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
 
+    # Attempt 1: resolved tickets WITH resolution notes (ideal for RCA quality)
     rows = conn.execute("""
         SELECT id, description, severity, category, resolution_notes,
                resolution_time_hrs, status
         FROM   tickets
         WHERE  status = 'resolved'
-          AND  (resolution_notes IS NOT NULL AND resolution_notes != '')
+          AND  resolution_notes IS NOT NULL
+          AND  resolution_notes NOT IN ('', 'nan', 'None', 'NaN')
         ORDER  BY opened_at DESC
+        LIMIT  50000
     """).fetchall()
+    print(f"   Resolved with notes: {len(rows):,}")
+
+    # Attempt 2: ITSM_data.csv has sparse Closure_Code — use all resolved
+    if len(rows) < MIN_RESOLVED:
+        print(f"   ⚠️  Too few with notes. Expanding to all resolved tickets...")
+        rows = conn.execute("""
+            SELECT id, description, severity, category, resolution_notes,
+                   resolution_time_hrs, status
+            FROM   tickets
+            WHERE  status = 'resolved'
+            ORDER  BY opened_at DESC
+            LIMIT  50000
+        """).fetchall()
+        print(f"   All resolved: {len(rows):,}")
+
+    # Attempt 3: last resort — include all tickets regardless of status
+    if len(rows) < MIN_RESOLVED:
+        print(f"   ⚠️  Not enough resolved. Including all tickets...")
+        rows = conn.execute("""
+            SELECT id, description, severity, category, resolution_notes,
+                   resolution_time_hrs, status
+            FROM   tickets
+            ORDER  BY opened_at DESC
+            LIMIT  50000
+        """).fetchall()
+        print(f"   All tickets: {len(rows):,}")
+
     conn.close()
 
     if len(rows) < MIN_RESOLVED:
         raise RuntimeError(
-            f"Only {len(rows)} resolved tickets found. "
-            f"Need at least {MIN_RESOLVED} to build a useful index. "
-            f"Run setup_db.py to seed the database first."
+            f"Only {len(rows)} tickets in database. "
+            f"Run: python setup_db.py --data data/tickets_clean.csv"
         )
 
     tickets = [dict(r) for r in rows]
