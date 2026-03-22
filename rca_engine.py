@@ -37,6 +37,7 @@ STORE_PATH      = "db/memory_store.pkl"  # parallel list of ticket dicts
 EMBED_MODEL     = "all-MiniLM-L6-v2"    # fast, accurate, free, runs locally
 GROQ_MODEL      = "llama-3.3-70b-versatile"
 MIN_RESOLVED    = 5    # minimum resolved tickets needed before RCA is useful
+MAX_INDEX_SIZE  = 50000
 
 # Lazy-loaded globals (only built once at startup)
 _faiss_index    = None
@@ -129,52 +130,56 @@ def build_index(force_rebuild: bool = False) -> tuple:
 
     if not force_rebuild and Path(INDEX_PATH).exists() and Path(STORE_PATH).exists():
         print("📂 Loading existing FAISS index from disk...")
-        index  = faiss.read_index(INDEX_PATH)
-        with open(STORE_PATH, "rb") as f:
-            store = pickle.load(f)
-        print(f"   ✅ Index loaded: {index.ntotal:,} vectors")
-        _index_ready = True
-        return index, store
+        try:
+            index  = faiss.read_index(INDEX_PATH)
+            with open(STORE_PATH, "rb") as f:
+                store = pickle.load(f)
+            if index.ntotal != len(store):
+                raise RuntimeError(
+                    f"Index/store mismatch ({index.ntotal} != {len(store)})"
+                )
+            print(f"   ✅ Index loaded: {index.ntotal:,} vectors")
+            _index_ready = True
+            return index, store
+        except Exception as e:
+            print(f"   ⚠️  Saved index invalid ({e}). Rebuilding...")
 
     print("🔨 Building FAISS index...")
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(tickets)").fetchall()}
+    ci_cat_sel = "ci_cat" if "ci_cat" in cols else "'' AS ci_cat"
+    ci_sub_sel = "ci_subcat" if "ci_subcat" in cols else "'' AS ci_subcat"
 
-    # Attempt 1: resolved tickets WITH resolution notes (ideal for RCA quality)
-    rows = conn.execute("""
-        SELECT id, description, severity, category, resolution_notes,
-               resolution_time_hrs, status, ci_cat, ci_subcat
+    resolved_with_notes = conn.execute("""
+        SELECT COUNT(*)
         FROM   tickets
         WHERE  status = 'resolved'
           AND  resolution_notes IS NOT NULL
           AND  resolution_notes NOT IN ('', 'nan', 'None', 'NaN')
+    """).fetchone()[0]
+    print(f"   Resolved with notes: {resolved_with_notes:,}")
+
+    # Build index from all resolved tickets so full historical memory is available.
+    rows = conn.execute(f"""
+        SELECT id, description, severity, category, resolution_notes,
+               resolution_time_hrs, status, {ci_cat_sel}, {ci_sub_sel}
+        FROM   tickets
+        WHERE  status = 'resolved'
         ORDER  BY opened_at DESC
-        LIMIT  50000
+        LIMIT  {MAX_INDEX_SIZE}
     """).fetchall()
-    print(f"   Resolved with notes: {len(rows):,}")
+    print(f"   All resolved loaded: {len(rows):,}")
 
-    # Attempt 2: use all resolved
-    if len(rows) < MIN_RESOLVED:
-        print(f"   ⚠️  Too few with notes. Expanding to all resolved tickets...")
-        rows = conn.execute("""
-            SELECT id, description, severity, category, resolution_notes,
-                   resolution_time_hrs, status, ci_cat, ci_subcat
-            FROM   tickets
-            WHERE  status = 'resolved'
-            ORDER  BY opened_at DESC
-            LIMIT  50000
-        """).fetchall()
-        print(f"   All resolved: {len(rows):,}")
-
-    # Attempt 3: last resort — include all tickets regardless of status
+    # Last resort — include all tickets regardless of status
     if len(rows) < MIN_RESOLVED:
         print(f"   ⚠️  Not enough resolved. Including all tickets...")
-        rows = conn.execute("""
+        rows = conn.execute(f"""
             SELECT id, description, severity, category, resolution_notes,
-                   resolution_time_hrs, status, ci_cat, ci_subcat
+                   resolution_time_hrs, status, {ci_cat_sel}, {ci_sub_sel}
             FROM   tickets
             ORDER  BY opened_at DESC
-            LIMIT  50000
+            LIMIT  {MAX_INDEX_SIZE}
         """).fetchall()
         print(f"   All tickets: {len(rows):,}")
 
@@ -228,7 +233,7 @@ def add_to_index(ticket: dict):
     global _faiss_index, _memory_store
     import faiss
 
-    if _faiss_index is None:
+    if _faiss_index is None or _memory_store is None:
         return
 
     text   = build_ticket_text(ticket)
@@ -258,6 +263,8 @@ def search_similar(description: str, k: int = 5) -> list[dict]:
     for score, idx in zip(scores[0], indices[0]):
         if idx == -1:
             continue
+        if idx >= len(store):
+            continue
         ticket = store[idx].copy()
         # Cosine similarity is in [-1, 1] after L2 norm; clamp to [0, 1]
         sim_score = max(0.0, min(1.0, float(score)))
@@ -278,10 +285,10 @@ def calibrate_confidence(raw_confidence: int, similar: list[dict], ticket: dict)
       - Historical fix outcome data for the category
       - Severity alignment between new and matched tickets
     
-    Returns adjusted confidence score 0-100.
+    Returns adjusted confidence score 15-95.
     """
     if not similar:
-        return max(10, raw_confidence // 2)
+        return max(35, min(95, raw_confidence))
 
     # 1. Average similarity of top matches (0-100 scale)
     avg_sim = np.mean([s.get("similarity_pct", 0) for s in similar[:3]])
@@ -291,12 +298,12 @@ def calibrate_confidence(raw_confidence: int, similar: list[dict], ticket: dict)
         1 for s in similar[:3]
         if s.get("resolution_notes") and str(s["resolution_notes"]).lower() not in ("nan", "none", "")
     )
-    resolution_bonus = has_resolution * 8  # up to +24 for 3 matches with resolutions
+    resolution_bonus = has_resolution * 10  # up to +30 for 3 matches with resolutions
 
     # 3. Severity match bonus — same severity = better pattern
     ticket_sev = ticket.get("severity", "P3")
     sev_matches = sum(1 for s in similar[:3] if s.get("severity") == ticket_sev)
-    sev_bonus = sev_matches * 5  # up to +15
+    sev_bonus = sev_matches * 6  # up to +18
 
     # 4. Category match bonus
     ticket_cat = ticket.get("category", "General")
@@ -319,21 +326,23 @@ def calibrate_confidence(raw_confidence: int, similar: list[dict], ticket: dict)
     except Exception:
         pass
 
-    # Blend: 40% LLM confidence + 35% similarity + 25% bonuses
+    # Blend: favor objective similarity/history more than raw LLM score
     blended = (
-        raw_confidence * 0.40 +
-        avg_sim * 0.35 +
+        raw_confidence * 0.30 +
+        avg_sim * 0.45 +
         (resolution_bonus + sev_bonus + cat_bonus) * 0.25
     )
     calibrated = int(blended * outcome_multiplier)
 
     # Clamp to reasonable range — never show 0% if we have data
-    if similar and avg_sim > 30:
-        calibrated = max(calibrated, 25)
     if similar and avg_sim > 60:
+        calibrated = max(calibrated, 50)
+    elif similar and avg_sim > 45:
         calibrated = max(calibrated, 45)
+    elif similar and avg_sim > 30:
+        calibrated = max(calibrated, 30)
 
-    return max(5, min(95, calibrated))
+    return max(15, min(95, calibrated))
 
 
 def determine_risk_tier(confidence: int, severity: str, similar: list[dict]) -> str:
