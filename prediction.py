@@ -236,7 +236,7 @@ def parse_response(raw: str) -> dict:
 def calibrate_confidence(raw: int, category: str, severity: str, conn) -> int:
     """
     Adjusts confidence using historical fix outcome data from DB.
-    No history   → trust Groq score but deflate slightly (no hardcoded floor)
+    No history   → trust Groq score with minimal deflation to preserve path diversity
     Good history → blend LLM score with historical accuracy
     Rollbacks    → penalise (-10 per rollback)
     P1           → cap at 80 so human always involved
@@ -251,9 +251,8 @@ def calibrate_confidence(raw: int, category: str, severity: str, conn) -> int:
     total_history = sum(r[3] for r in rows) if rows else 0
 
     if total_history < 5:
-        # No history — trust Groq but deflate by 20% to be conservative
-        # DO NOT hardcode 55 — that sends everything to Path C
-        calibrated = int(raw * 0.80)
+        # No history — deflate slightly (10%) to be conservative but not over-restrict
+        calibrated = int(raw * 0.90)
     else:
         total_approvals  = sum(r[0] for r in rows)
         total_actions    = sum(r[3] for r in rows)
@@ -277,35 +276,39 @@ def calibrate_confidence(raw: int, category: str, severity: str, conn) -> int:
 def get_approval_path(confidence: int, risk_tier: str, severity: str) -> str:
     """
     Path A = Auto-execute (10s cancel window) — P3, low risk, high confidence
-    Path B = Single operator approve/reject — P2 or medium confidence
-    Path C = Mandatory senior review — P1 always, or critical+low confidence
-
-    Key fix: Critical risk alone no longer forces Path C if confidence >= 70.
-    This prevents P2 tickets from always landing in Path C just because
-    Groq returns risk_tier=Critical with decent confidence.
+    Path B = Single operator approve/reject — P2 with decent confidence, or medium risk
+    Path C = Mandatory senior review — P1 always, critical+low confidence, or very low confidence
     """
     # P1 is always Path C — non-negotiable
     if severity == "P1":
         return "C"
 
-    # Critical risk: only force C when confidence is also low
-    if risk_tier == "Critical":
-        return "C" if confidence < 70 else "B"
+    # Very low confidence → require senior review
+    if confidence < 40:
+        return "C"
+
+    # Critical risk: only force C when confidence is also low (<70)
+    if risk_tier == "Critical" and confidence < 70:
+        return "C"
 
     # P3 with high confidence and explicitly low risk → auto-execute
-    if severity == "P3" and risk_tier == "Low" and confidence >= 82:
+    if severity == "P3" and risk_tier == "Low" and confidence >= 75:
         return "A"
 
-    # P2 or medium risk → single operator approval
-    if severity == "P2" or risk_tier == "Medium":
+    # P3 with decent confidence → single operator approval
+    if severity == "P3" and confidence >= 65:
         return "B"
 
-    # P3 with decent confidence → single approval
-    if confidence >= 65:
+    # P2 with decent confidence → single operator approval
+    if severity == "P2" and confidence >= 60:
         return "B"
 
-    # Low confidence → require review
-    return "C"
+    # P2 with lower confidence → require review
+    if severity == "P2":
+        return "C"
+
+    # P3 fallback
+    return "B"
 
 
 # ── Keyword fallback (if Groq is down or key missing) ────────────────────────
@@ -457,13 +460,18 @@ def predict_ticket(
             datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         ))
 
-        # Escalate severity in tickets table if AI found higher severity
+        # Escalate severity in tickets table only from P3 (auto-detected default).
+        # Do NOT override P2 or P1 — respect the user's explicit severity choice.
         existing = conn.execute(
             "SELECT severity FROM tickets WHERE id=?", (ticket_id,)
         ).fetchone()
         if existing:
+            existing_sev = dict(existing).get("severity", "P3")
             rank = {"P1":1,"P2":2,"P3":3}
-            if rank.get(result["predicted_severity"],3) < rank.get(existing["severity"],3):
+            predicted_rank = rank.get(result["predicted_severity"], 3)
+            existing_rank  = rank.get(existing_sev, 3)
+            # Only escalate when current severity is P3 (the default) and AI says higher
+            if existing_sev == "P3" and predicted_rank < existing_rank:
                 conn.execute(
                     "UPDATE tickets SET severity=? WHERE id=?",
                     (result["predicted_severity"], ticket_id)

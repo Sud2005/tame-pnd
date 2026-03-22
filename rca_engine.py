@@ -636,40 +636,40 @@ def _parse_rca_response(raw: str) -> dict:
 def _get_approval_path(confidence: int, risk_tier: str, severity: str) -> str:
     """
     Determines approval workflow path based on calibrated confidence, risk, and severity.
-    
+
     Path A (Auto-execute):  High confidence (≥75%) + Low risk + P3
-    Path B (Operator approval): Medium confidence or medium risk or P2
-    Path C (Senior review): Low confidence (<40%) or Critical risk or P1
+    Path B (Operator approval): Medium confidence or medium risk or P2 with decent confidence
+    Path C (Senior review): Low confidence (<40%) or P1 or Critical+low confidence
     """
     # P1 always needs senior review
     if severity == "P1":
         return "C"
-    
-    # Critical risk always needs senior review
-    if risk_tier == "Critical":
+
+    # Critical risk with low confidence → senior review
+    if risk_tier == "Critical" and confidence < 70:
         return "C"
-    
+
     # Low confidence needs senior review
     if confidence < 40:
         return "C"
-    
+
     # P3 with high confidence + low risk = auto-execute
     if severity == "P3" and confidence >= 75 and risk_tier == "Low":
         return "A"
-    
-    # P3 with decent confidence = operator just approves
-    if severity == "P3" and confidence >= 55:
+
+    # P3 with decent confidence = operator approval
+    if severity == "P3" and confidence >= 65:
         return "B"
-    
-    # P2 with high confidence and not critical = operator approval  
+
+    # P2 with decent confidence = operator approval
     if severity == "P2" and confidence >= 60:
         return "B"
-    
+
     # Default for P2 with lower confidence
     if severity == "P2":
         return "C"
 
-    # Default: operator approval
+    # P3 fallback
     return "B"
 
 
