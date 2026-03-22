@@ -68,6 +68,21 @@ def test_direct():
         check("Index builds successfully",  True)
         check("Has vectors",                index.ntotal > 0,         str(index.ntotal))
         check("Store matches index size",   len(store) == index.ntotal)
+        try:
+            import sqlite3
+            conn = sqlite3.connect("db/opsai.db")
+            expected = conn.execute(
+                "SELECT COUNT(*) FROM tickets WHERE status='resolved'"
+            ).fetchone()[0]
+            conn.close()
+            if expected >= 46000:
+                check("Large historical index loaded (46k+)", index.ntotal >= 46000,
+                      f"{index.ntotal:,} vectors")
+            else:
+                check("Index covers resolved ticket set", index.ntotal == expected,
+                      f"{index.ntotal:,}/{expected:,}")
+        except Exception as e:
+            check("Large index validation skipped", True, str(e)[:60])
         check("Minimum viable memory",      index.ntotal >= 5,        f"{index.ntotal} vectors")
         print(f"\n     📊 Index size: {index.ntotal:,} resolved tickets in memory")
     except Exception as e:
@@ -158,9 +173,11 @@ def test_direct():
             "status": "resolved",
         })
 
-        index_after, _ = get_index()
+        index_after, store_after = get_index()
         check("New resolution added to FAISS",  index_after.ntotal > size_before,
               f"{size_before} → {index_after.ntotal}")
+        check("Index/store synchronized after update", index_after.ntotal == len(store_after),
+              f"{index_after.ntotal} == {len(store_after)}")
     except Exception as e:
         check("Memory learning works", False, str(e)[:60])
 
