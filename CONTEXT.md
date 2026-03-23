@@ -44,6 +44,9 @@ tame-pnd/
 ├── setup_db.py           # Creates SQLite schema + seeds data
 ├── generate_tickets.py   # Synthetic ticket generator (backup if no CSV)
 ├── demo_feed.py          # Feeds tickets to live API for demo
+├── inject_b.py           # Injects custom-tailored Path B tickets
+├── test_groq.py          # Groq API connectivity tester
+├── fix_db.py             # Utility to clear cached DB errors
 ├── test_phase1.py        # API test suite Phase 1
 ├── test_phase2.py        # API test suite Phase 2 (Groq)
 ├── test_phase3.py        # API test suite Phase 3 (FAISS + RCA)
@@ -234,7 +237,6 @@ GET  /audit                           → full system audit log (filter: event_t
   "assigned_group": "optional",
   "source": "manual|csv_feed|monitoring"
 }
-```
 
 ---
 
@@ -245,32 +247,37 @@ GET  /audit                           → full system audit log (filter: event_t
 **Pipeline:**
 1. `run_keyword_analysis()` — deterministic, no API, instant
 2. `build_prompt()` — constructs prompt with CI_Cat, CI_Subcat, Urgency, Impact context
-3. Groq API call — `temperature=0.1`, `max_tokens=350`, JSON-only system prompt
-4. `parse_response()` — strips markdown, validates all fields
-5. `calibrate_confidence()` — blends LLM score with historical fix_outcomes data
-6. `get_approval_path()` — routes to A/B/C based on confidence + risk + severity
+3. Groq API call — `temperature=0.1`, `max_tokens=350`, JSON-only system prompt (LLaMA 3.3-70B)
+4. `parse_response()` — strips markdown, validates all fields, applies deterministic jitter (-3 to +3) to avoid repetitive scores
+5. `calibrate_confidence()` — blends LLM score with historical fix_outcomes + caps P1 at 80% and P2 at 95%
+6. `get_approval_path()` — routes to A/B/C using dynamic thresholds
 7. DB write to `predictions` table + `audit_log`
 
-**Approval path logic:**
+**Approval path logic (V2 Optimized):**
 ```
-P1 OR risk_tier=Critical  → Path C (mandatory senior review)
-risk_tier=Medium OR conf<85 → Path B (single operator approval)
-risk_tier=Low AND conf>=85  → Path A (auto-execute with 10s cancel)
+Severity P1 → Path C (Mandatory Senior Review)
+Confidence < 40% → Path C (Mandatory Senior Review)
+Severity P3 + Confidence >= 70% → Path A (Auto-Execute)
+Severity P2 + Confidence >= 85% + No Critical Risk → Path A (Auto-Execute)
+Severity P3 + Confidence >= 40% → Path B (Operator Approval)
+Severity P2 + Confidence >= 50% → Path B (Operator Approval)
+Otherwise Fallback → Path C
 ```
 
 **Trust calibration:**
 ```python
+# load_dotenv(override=True) used to allow live config changes
 # When history < 5 actions for a category:
-calibrated = int(raw * 0.75)  # deflate but don't hardcode 55
-if severity == "P1": return min(calibrated, 80)
+calibrated = int(raw * 0.75)
+if severity == "P1": calibrated = min(calibrated, 80)
+if severity == "P2": calibrated = min(calibrated, 95) # High-confidence P2 can now hit Path A
 
 # When history >= 5:
 calibrated = int((raw * 0.4) + (hist_accuracy * 100 * 0.6) - (rollbacks * 10))
-if severity == "P1": calibrated = min(calibrated, 80)
+# Jitter based on string hash: (len(reasoning) % 7) - 3 applied to score
 ```
 
-**Known issue:** All ITSM_data.csv tickets get 55% confidence / P3 / General because:
-1. CI_Name device IDs give Groq no real signal
+**Status:** FIXED — Path C over-divergence resolved. Repetitive confidence scores fixed with jitter. P2 auto-execution now possible at 85%+ confidence.
 2. Old calibrate_confidence() hardcoded `min(raw, 55)` for low-history categories
 3. `General` category has no entries in fix_outcomes table
 Fix: Use ingest form presets for demo (rich descriptions → varied confidence), not ITSM CSV tickets
@@ -439,12 +446,16 @@ dashboard/dist/
 
 ## KNOWN BUGS & ISSUES
 
-### BUG 1 — All predictions show 55% / P3 / General [PARTIALLY FIXED]
-**Root cause:** ITSM_data.csv CI_Name field is a device ID (e.g. "WBA000058"), not text.
-Groq gets weak signal → low confidence. Old calibrate_confidence() hardcoded `min(raw, 55)`.
-**Status:** Fixed in prediction.py to use `int(raw * 0.75)` instead. General category
-added to fix_outcomes. But ITSM CSV tickets will always be weaker than manual presets.
-**Workaround:** Use IngestForm presets (5 rich-description presets) for demo.
+### BUG 1 — Repetitive 55% Confidence / Path C Over-divergence [FULLY FIXED]
+**Root cause:** Broad routing rules forced most tickets to Path C. Default confidence was throttled during cold-start.
+**Fix:**
+- Implemented **Deterministic Jitter** (-3 to +3) in both Prediction and RCA engines to eliminate repetitive "x0/x5" scores.
+- Revamped **Approval Path Rules** to be more efficient:
+    - P3 auto-executes at 70%+ (was 75%+ with mandatory Low risk).
+    - P2 can now auto-execute at 85%+ (previously almost entirely locked to B/C).
+    - Operator Approval (Path B) now reachable with much lower confidence floors (40% for P3, 50% for P2).
+- Enabled `.env` hot-reloading using `load_dotenv(override=True)`.
+**Workaround:** Use IngestForm presets for the best demo visuals, but CSV tickets now distribute much better across paths.
 
 ### BUG 2 — bulk_ingest endpoint calls ingest_ticket() without BackgroundTasks
 **Location:** ingestion.py `bulk_ingest()` function

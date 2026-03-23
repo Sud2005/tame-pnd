@@ -29,6 +29,24 @@ const SEV_COLOR  = { P1: COLORS.p1,  P2: COLORS.p2,  P3: COLORS.p3  };
 const SEV_DIM    = { P1: COLORS.p1Dim,P2: COLORS.p2Dim,P3: COLORS.p3Dim };
 const RISK_COLOR = { Critical: COLORS.critical, Medium: COLORS.medium, Low: COLORS.low };
 const PATH_LABEL = { A: "AUTO-EXECUTE", B: "APPROVAL REQUIRED", C: "SENIOR REVIEW" };
+const STATUS_COLOR = {
+  open: COLORS.p2, pending_approval: COLORS.accent, resolved: COLORS.p3,
+  rolled_back: "#FF6B35", rejected: "#CC2244", reraised: "#7B61FF",
+};
+const STATUS_LABEL = {
+  open: "OPEN", pending_approval: "PENDING", resolved: "RESOLVED",
+  rolled_back: "ROLLED BACK", rejected: "REJECTED", reraised: "RE-RAISED",
+};
+
+// Map recommended_fix text to a simulation fix_type (mirrors backend _map_fix_to_type)
+function mapFixType(text) {
+  const t = (text || "").toLowerCase();
+  if (["restart","reboot","service"].some(k => t.includes(k))) return "restart_service";
+  if (["cache","clear","purge","flush"].some(k => t.includes(k))) return "clear_cache";
+  if (["scale","replica","capacity","horizontal"].some(k => t.includes(k))) return "scale_up";
+  if (["rollback","revert","undo","previous","config"].some(k => t.includes(k))) return "rollback_config";
+  return "restart_service";
+}
 
 // ── Global styles injected once ───────────────────────────────────────────────
 const GLOBAL_CSS = `
@@ -163,8 +181,14 @@ async function apiFetch(path, opts = {}) {
       headers: { "Content-Type": "application/json" },
       ...opts,
     });
-    return await res.json();
+    const data = await res.json();
+    if (!res.ok) {
+      console.warn(`API ${res.status} ${path}:`, data);
+      return { _error: true, status: res.status, detail: data?.detail || "Server error", ...data };
+    }
+    return data;
   } catch (e) {
+    console.error(`API fetch error ${path}:`, e);
     return null;
   }
 }
@@ -263,10 +287,7 @@ function TicketRow({ ticket: t, selected, onClick, isNew, delay }) {
   const sev   = t.severity || "P3";
   const color = SEV_COLOR[sev];
   const dim   = SEV_DIM[sev];
-  const statusColor = {
-    open: COLORS.p2, pending_approval: COLORS.accent,
-    resolved: COLORS.p3, default: COLORS.textDim,
-  }[t.status] || COLORS.textDim;
+  const statusColor = STATUS_COLOR[t.status] || COLORS.textDim;
 
   return (
     <div className={isNew ? "slide-in" : ""} onClick={onClick}
@@ -284,7 +305,7 @@ function TicketRow({ ticket: t, selected, onClick, isNew, delay }) {
           <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6, flexWrap: "wrap" }}>
             <Badge label={sev} color={color} dim={dim} />
             <Badge label={t.category || "General"} color={COLORS.textDim} />
-            <Badge label={t.status?.replace("_"," ").toUpperCase()} color={statusColor} />
+            <Badge label={STATUS_LABEL[t.status] || t.status?.replace("_"," ").toUpperCase()} color={statusColor} />
             {isNew && <Badge label="NEW" color={COLORS.accent} />}
           </div>
           <div style={{ fontSize: 13, fontWeight: 500, color: COLORS.text,
@@ -310,15 +331,19 @@ function RCADetail({ ticket, onApprove }) {
   const [loading, setLoading] = useState(false);
   const [triggering, setTriggering] = useState(false);
 
+  const [executions, setExecutions] = useState([]);
+
   useEffect(() => {
-    if (!ticket) { setRca(null); setPred(null); return; }
+    if (!ticket) { setRca(null); setPred(null); setExecutions([]); return; }
     setLoading(true);
     Promise.all([
       apiFetch(`/tickets/${ticket.id}/rca/result`),
       apiFetch(`/tickets/${ticket.id}/prediction`),
-    ]).then(([r, p]) => {
+      apiFetch(`/tickets/${ticket.id}/executions`),
+    ]).then(([r, p, ex]) => {
       setRca(r?.status !== "pending" ? r : null);
       setPred(p?.status !== "pending" ? p : null);
+      setExecutions(ex?.executions || []);
       setLoading(false);
     });
   }, [ticket?.id]);
@@ -526,6 +551,18 @@ function RCADetail({ ticket, onApprove }) {
           }}>
             PROCEED TO APPROVAL WORKFLOW →
           </button>
+
+          {/* Execution history */}
+          {executions.length > 0 && (
+            <ExecutionHistory executions={executions} ticketId={ticket.id}
+              onRefresh={() => {
+                apiFetch(`/tickets/${ticket.id}/executions`).then(d => setExecutions(d?.executions || []));
+              }}
+            />)}
+
+          {/* Reraise panel for rolled_back / rejected tickets */}
+          {(ticket.status === "rolled_back" || ticket.status === "rejected") && (
+            <ReraisePanel ticket={ticket} />)}
         </>
       )}
     </div>
@@ -557,53 +594,64 @@ function ApprovalWorkflow({ ticket, rca, pred, onComplete }) {
   const storedPath = pred?.approval_path || rca?.approval_path;
   const path = storedPath || (
     ticket.severity === "P1"                          ? "C" :
-    ticket.severity === "P3" && risk === "Low" && conf >= 75 ? "A" :
-    ticket.severity === "P3" && conf >= 65            ? "B" :
-    ticket.severity === "P2" && conf >= 60            ? "B" :
-    conf < 40                                         ? "C" :
-    "B"
+    ticket.severity === "P3" && conf >= 70             ? "A" :
+    ticket.severity === "P2" && conf >= 85 && risk !== "Critical" ? "A" :
+    ticket.severity === "P3" && conf >= 40             ? "B" :
+    ticket.severity === "P2" && conf >= 50             ? "B" :
+    conf < 40                                          ? "C" :
+    "C"
   );
   const riskColor = RISK_COLOR[risk] || COLORS.textDim;
 
+  const [rejectModal, setRejectModal] = useState(false);
+
   async function executeAction(action, reason = "") {
     setLoading(true);
-    await new Promise(r => setTimeout(r, 1500));
 
     let outcome = "success";
-    let apiResult = null;
+    const fixType = mapFixType(rca?.recommended_fix);
 
-    if (action === "reject") {
-      // Reject: ticket stays open, no success state
-      apiResult = await apiFetch(`/tickets/${ticket.id}/reject`, {
-        method: "POST",
-        body: JSON.stringify({
-          reason: reason || "Fix recommendation rejected by operator",
-          rejected_by: "operator",
-        }),
-      });
-      outcome = "rejected";
+    try {
+      if (action === "reject") {
+        // Use v2 reject endpoint with approval_actions trail
+        const res = await apiFetch(`/tickets/${ticket.id}/reject_v2`, {
+          method: "POST",
+          body: JSON.stringify({
+            operator_id: "ops_dashboard",
+            reject_reason: reason || "Fix recommendation rejected by operator",
+            approval_path: path,
+            rca_id: rca?.id || null,
+          }),
+        });
+        outcome = res?.status || "rejected";
 
-    } else if (action === "rollback") {
-      // Rollback: revert previously executed fix
-      apiResult = await apiFetch(`/tickets/${ticket.id}/rollback`, {
-        method: "POST",
-        body: JSON.stringify({
-          reason: reason || "Fix rolled back by operator",
-          rolled_back_by: "operator",
-        }),
-      });
-      outcome = "rolled_back";
+      } else if (action === "rollback") {
+        const res = await apiFetch(`/tickets/${ticket.id}/rollback`, {
+          method: "POST",
+          body: JSON.stringify({
+            reason: reason || "Fix rolled back by operator",
+            rolled_back_by: "ops_dashboard",
+          }),
+        });
+        outcome = res?.outcome || "rolled_back";
 
-    } else {
-      // approve / auto / senior_approve — execute and resolve
-      apiResult = await apiFetch(`/tickets/${ticket.id}/resolve`, {
-        method: "POST",
-        body: JSON.stringify({
-          resolution_notes: rca?.recommended_fix || "Fix approved and executed",
-          resolved_by: action === "auto" ? "system" : "operator",
-        }),
-      });
-      outcome = "success";
+      } else {
+        // approve / auto / senior_approve — call /execute endpoint
+        const apiResult = await apiFetch(`/tickets/${ticket.id}/execute`, {
+          method: "POST",
+          body: JSON.stringify({
+            fix_type: fixType,
+            operator_id: "ops_dashboard",
+            operator_reason: reason || rca?.recommended_fix || "Fix approved and executed",
+            approval_path: path,
+            rca_id: rca?.id || null,
+          }),
+        });
+        outcome = apiResult?.outcome || "success";
+      }
+    } catch (err) {
+      console.error("executeAction error:", err);
+      outcome = "error";
     }
 
     const resultData = {
@@ -612,7 +660,8 @@ function ApprovalWorkflow({ ticket, rca, pred, onComplete }) {
       fix_applied: outcome === "rejected" ? "N/A — fix rejected" :
                    outcome === "rolled_back" ? "Rolled back to pre-execution state" :
                    rca?.recommended_fix || "Manual remediation",
-      executed_by: action === "auto" ? "system" : "operator",
+      fix_type:    fixType,
+      executed_by: action === "auto" ? "system" : "ops_dashboard",
       timestamp:   new Date().toISOString(),
       outcome,
       rollback_available: outcome === "success",
@@ -620,7 +669,6 @@ function ApprovalWorkflow({ ticket, rca, pred, onComplete }) {
 
     setResult(resultData);
     setLoading(false);
-    // Removed: onComplete auto-switch — user manually navigates
   }
 
   function startAutoCountdown() {
@@ -804,15 +852,17 @@ function ApprovalWorkflow({ ticket, rca, pred, onComplete }) {
           }}>
             {loading ? <Spinner /> : "✓ APPROVE & EXECUTE"}
           </button>
-          <button onClick={() => {
-            const reason = document.getElementById("b-reject-reason")?.value || "Rejected by operator";
-            executeAction("reject", reason);
-          }} disabled={loading} style={{
+          <button onClick={() => setRejectModal(true)} disabled={loading} style={{
             padding: "14px", background: COLORS.p1 + "22", color: COLORS.p1,
             border: `1px solid ${COLORS.p1}44`, borderRadius: 8, fontSize: 14,
             fontWeight: 800, cursor: loading ? "not-allowed" : "pointer", fontFamily: "inherit",
           }}>✕ REJECT FIX</button>
         </div>
+        {rejectModal && (
+          <RejectModal ticket={ticket} path={path} rca={rca}
+            onClose={() => setRejectModal(false)}
+            onRejected={() => { setRejectModal(false); setResult({ action:"reject", outcome:"rejected", ticket_id:ticket.id, timestamp:new Date().toISOString() }); }}
+          />)}
       </Card>
     </div>
   );
@@ -901,7 +951,7 @@ function AuditTrail() {
     return () => clearInterval(i);
   }, []);
 
-  const EVENT_TYPES = ["ALL","INGEST","PREDICT","RCA","APPROVE","EXECUTE","ROLLBACK","RESOLVE"];
+  const EVENT_TYPES = ["ALL","INGEST","PREDICT","RCA","APPROVE","EXECUTE","ROLLBACK","REJECT","RESOLVE","AUTO_APPROVE","RERAISE"];
   const visible = filter === "ALL" ? events : events.filter(e => e.event_type === filter);
 
   function exportCSV() {
@@ -920,8 +970,9 @@ function AuditTrail() {
 
   const EVENT_COLOR = {
     INGEST: COLORS.textDim, PREDICT: COLORS.accent, RCA: "#A78BFA",
-    APPROVE: COLORS.p3, EXECUTE: COLORS.p3, REJECT: COLORS.p1,
-    ROLLBACK: COLORS.p2, RESOLVE: COLORS.p3, OVERRIDE: COLORS.p1,
+    APPROVE: COLORS.p3, EXECUTE: COLORS.p3, REJECT: "#CC2244",
+    ROLLBACK: "#FF6B35", RESOLVE: COLORS.p3, OVERRIDE: COLORS.p1,
+    AUTO_APPROVE: COLORS.accent, RERAISE: "#7B61FF",
   };
 
   return (
@@ -1059,8 +1110,8 @@ function MemoryBrowser() {
 
   useEffect(() => { doSearch(0); }, [doSearch]);
 
-  const categories = ["","Database","Network","Authentication","Infrastructure","Application","General"];
-  const statuses   = ["","open","pending_approval","resolved"];
+  const categories = ["","Database","Network","Authentication","Infrastructure","Application","General","Cache","Maintenance","UI","Performance"];
+  const statuses   = ["","open","pending_approval","resolved","rolled_back","rejected"];
 
   function exportCSV() {
     if (!tickets.length) return;
@@ -1269,10 +1320,8 @@ function MemoryBrowser() {
                     {t.resolution_time_hrs ? `${t.resolution_time_hrs}h` : "—"}
                   </td>
                   <td style={{ padding:"8px 10px", whiteSpace:"nowrap" }}>
-                    <Badge label={t.status?.replace("_"," ")||"?"} color={
-                      t.status==="resolved"?"#00E676":
-                      t.status==="open"?"#FFB020":
-                      t.status==="pending_approval"?"#00D4FF":COLORS.textDim
+                    <Badge label={STATUS_LABEL[t.status] || t.status?.replace("_"," ").toUpperCase() || "?"} color={
+                      STATUS_COLOR[t.status] || COLORS.textDim
                     } />
                   </td>
                   <td style={{ padding:"8px 10px", whiteSpace:"nowrap" }}>
@@ -1294,56 +1343,543 @@ function MemoryBrowser() {
       </div>
 
       {/* Solution floating modal */}
-      {solutionTicket && (
-        <div onClick={() => setSolutionTicket(null)} style={{
-          position:"fixed", inset:0, background:"rgba(0,0,0,0.8)",
-          zIndex:300, display:"flex", alignItems:"center", justifyContent:"center",
-          animation:"fade-in 0.2s ease",
-        }}>
-          <div onClick={e=>e.stopPropagation()} style={{
-            width:520, maxHeight:"80vh", background:COLORS.card,
-            border:`1px solid ${COLORS.border}`, borderRadius:12,
-            padding:28, animation:"slide-in 0.25s ease", overflowY:"auto",
-          }}>
-            <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", marginBottom:16 }}>
-              <div>
-                <div style={{ fontSize:14, fontWeight:800 }}>Solution</div>
-                <div className="mono" style={{ fontSize:10, color:COLORS.accent, marginTop:2 }}>
-                  {solutionTicket.id}
+      {solutionTicket && <SolutionModal ticket={solutionTicket} onClose={() => setSolutionTicket(null)} />}
+    </div>
+  );
+}
+
+// ── SolutionModal — detailed RCA view from Memory Browser ─────────────────────
+function SolutionModal({ ticket, onClose }) {
+  const [rca, setRca] = useState(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    setLoading(true);
+    apiFetch(`/tickets/${ticket.id}/rca/result`).then(data => {
+      if (data && data.status !== "pending") setRca(data);
+      setLoading(false);
+    }).catch(() => setLoading(false));
+  }, [ticket.id]);
+
+  // Parse resolution_notes sections (from _build_detailed_resolution)
+  const notes = ticket.resolution_notes || "";
+  const sections = {};
+  for (const line of notes.split("\n")) {
+    const trimmed = line.trim();
+    if (trimmed.startsWith("ROOT CAUSE:")) sections.rootCause = trimmed.replace("ROOT CAUSE:", "").trim();
+    else if (trimmed.startsWith("RECOMMENDED FIX:")) sections.recFix = trimmed.replace("RECOMMENDED FIX:", "").trim();
+    else if (trimmed.startsWith("PATTERN MATCH:")) sections.pattern = trimmed.replace("PATTERN MATCH:", "").trim();
+    else if (trimmed.startsWith("WARNINGS:")) sections.warnings = trimmed.replace("WARNINGS:", "").trim();
+    else if (trimmed.startsWith("EXECUTION RESULT:")) sections.execResult = trimmed.replace("EXECUTION RESULT:", "").trim();
+    else if (trimmed.startsWith("FIX TYPE:")) sections.fixType = trimmed.replace("FIX TYPE:", "").trim();
+  }
+  // Extract numbered fix steps
+  const stepLines = notes.split("\n").filter(l => /^\s+\d+\./.test(l)).map(l => l.replace(/^\s+\d+\.\s*/, ""));
+
+  // Prefer RCA data over parsed notes
+  const rootCause = rca?.root_cause || sections.rootCause || "";
+  const recFix = rca?.recommended_fix || sections.recFix || "";
+  const pattern = rca?.pattern_match || sections.pattern || "";
+  const warnings = rca?.warnings || sections.warnings || "";
+  const fixSteps = (rca?.fix_steps && Array.isArray(rca.fix_steps) && rca.fix_steps.length > 0)
+    ? rca.fix_steps
+    : (stepLines.length > 0 ? stepLines : []);
+
+  const statusColor = STATUS_COLOR[ticket.status] || COLORS.textDim;
+  const statusLabel = STATUS_LABEL[ticket.status] || ticket.status?.replace("_"," ").toUpperCase() || "?";
+
+  return (
+    <div onClick={e => { if (e.target === e.currentTarget) onClose(); }} style={{
+      position:"fixed", inset:0, background:"rgba(0,0,0,0.8)",
+      zIndex:300, display:"flex", alignItems:"center", justifyContent:"center",
+      animation:"fade-in 0.2s ease",
+    }}>
+      <div onClick={e=>e.stopPropagation()} style={{
+        width:600, maxHeight:"85vh", background:COLORS.card,
+        border:`1px solid ${COLORS.border}`, borderRadius:12,
+        padding:28, animation:"slide-in 0.25s ease", overflowY:"auto",
+      }}>
+        {/* Header */}
+        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", marginBottom:16 }}>
+          <div>
+            <div style={{ fontSize:16, fontWeight:800 }}>Detailed Solution</div>
+            <div className="mono" style={{ fontSize:10, color:COLORS.accent, marginTop:2 }}>
+              {ticket.id}
+            </div>
+          </div>
+          <button onClick={onClose} style={{
+            background:"none", border:"none", color:COLORS.textDim,
+            cursor:"pointer", fontSize:16, padding:"2px 6px",
+          }}>✕</button>
+        </div>
+
+        {/* Badges */}
+        <div style={{ display:"flex", gap:8, flexWrap:"wrap", marginBottom:14 }}>
+          <Badge label={ticket.severity||"?"} color={SEV_COLOR[ticket.severity]||COLORS.textDim} dim={SEV_DIM[ticket.severity]} />
+          <Badge label={ticket.category||"General"} color={COLORS.textDim} />
+          <Badge label={statusLabel} color={statusColor} />
+          {sections.fixType && <Badge label={sections.fixType.replace("_"," ")} color={COLORS.accent} />}
+        </div>
+
+        {/* Description */}
+        <div style={{ fontSize:12, color:COLORS.textDim, marginBottom:16, lineHeight:1.6, padding:"10px 14px",
+          background:COLORS.surface, borderRadius:6, border:`1px solid ${COLORS.border}` }}>
+          {ticket.description}
+        </div>
+
+        {loading && <div style={{ textAlign:"center", padding:20 }}><Spinner /></div>}
+
+        {/* Root Cause */}
+        {rootCause && (
+          <div style={{ marginBottom:14 }}>
+            <div className="mono" style={{ fontSize:9, color:COLORS.p1, letterSpacing:"0.1em", marginBottom:6, fontWeight:700 }}>
+              ROOT CAUSE
+            </div>
+            <div style={{ padding:"12px 14px", background:COLORS.p1+"10", border:`1px solid ${COLORS.p1}33`,
+              borderRadius:6, fontSize:13, color:COLORS.text, lineHeight:1.7 }}>
+              {rootCause}
+            </div>
+          </div>
+        )}
+
+        {/* Recommended Fix */}
+        {recFix && (
+          <div style={{ marginBottom:14 }}>
+            <div className="mono" style={{ fontSize:9, color:COLORS.p3, letterSpacing:"0.1em", marginBottom:6, fontWeight:700 }}>
+              RECOMMENDED FIX
+            </div>
+            <div style={{ padding:"12px 14px", background:COLORS.p3+"10", border:`1px solid ${COLORS.p3}33`,
+              borderRadius:6, fontSize:13, color:COLORS.text, lineHeight:1.7 }}>
+              {recFix}
+            </div>
+          </div>
+        )}
+
+        {/* Fix Steps */}
+        {fixSteps.length > 0 && (
+          <div style={{ marginBottom:14 }}>
+            <div className="mono" style={{ fontSize:9, color:COLORS.accent, letterSpacing:"0.1em", marginBottom:6, fontWeight:700 }}>
+              FIX STEPS
+            </div>
+            <div style={{ padding:"12px 14px", background:COLORS.accent+"08", border:`1px solid ${COLORS.accent}22`,
+              borderRadius:6 }}>
+              {fixSteps.map((step, i) => (
+                <div key={i} style={{ display:"flex", gap:10, marginBottom:i < fixSteps.length-1 ? 8 : 0,
+                  fontSize:12, color:COLORS.text, lineHeight:1.6 }}>
+                  <span className="mono" style={{ color:COLORS.accent, fontWeight:800, flexShrink:0 }}>{i+1}.</span>
+                  <span>{step}</span>
                 </div>
-              </div>
-              <button onClick={()=>setSolutionTicket(null)} style={{
-                background:"none", border:"none", color:COLORS.textDim,
-                cursor:"pointer", fontSize:16, padding:"2px 6px",
-              }}>✕</button>
+              ))}
             </div>
-            <div style={{ display:"flex", gap:8, flexWrap:"wrap", marginBottom:14 }}>
-              <Badge label={solutionTicket.severity||"?"} color={SEV_COLOR[solutionTicket.severity]||COLORS.textDim} dim={SEV_DIM[solutionTicket.severity]} />
-              <Badge label={solutionTicket.category||"General"} color={COLORS.textDim} />
-              <Badge label="APPROVED" color={COLORS.p3} />
+          </div>
+        )}
+
+        {/* Pattern Match */}
+        {pattern && (
+          <div style={{ marginBottom:14 }}>
+            <div className="mono" style={{ fontSize:9, color:"#A78BFA", letterSpacing:"0.1em", marginBottom:6, fontWeight:700 }}>
+              PATTERN MATCH
             </div>
-            <div style={{ fontSize:12, color:COLORS.textDim, marginBottom:12, lineHeight:1.6 }}>
-              {solutionTicket.description}
+            <div style={{ padding:"10px 14px", background:"#A78BFA10", border:"1px solid #A78BFA33",
+              borderRadius:6, fontSize:12, color:COLORS.text, lineHeight:1.6 }}>
+              {pattern}
             </div>
-            <div style={{ fontSize:10, color:COLORS.textDim, letterSpacing:"0.1em", marginBottom:8 }}>
-              RESOLUTION / SOLUTION
+          </div>
+        )}
+
+        {/* Warnings */}
+        {warnings && warnings.toLowerCase() !== "null" && warnings.toLowerCase() !== "none" && (
+          <div style={{ marginBottom:14 }}>
+            <div className="mono" style={{ fontSize:9, color:COLORS.p2, letterSpacing:"0.1em", marginBottom:6, fontWeight:700 }}>
+              ⚠ WARNINGS
             </div>
-            <div style={{
-              padding:"14px 16px", background:COLORS.p3+"15",
-              border:`1px solid ${COLORS.p3}33`, borderRadius:8,
-              fontSize:13, color:COLORS.p3, lineHeight:1.7,
-            }}>
-              {solutionTicket.resolution_notes}
+            <div style={{ padding:"10px 14px", background:COLORS.p2+"10", border:`1px solid ${COLORS.p2}33`,
+              borderRadius:6, fontSize:12, color:COLORS.p2, lineHeight:1.6 }}>
+              {warnings}
             </div>
-            {solutionTicket.resolution_time_hrs && (
-              <div className="mono" style={{ fontSize:10, color:COLORS.textDim, marginTop:10 }}>
-                Resolution time: {solutionTicket.resolution_time_hrs}h
-              </div>
+          </div>
+        )}
+
+        {/* Execution result */}
+        {sections.execResult && (
+          <div style={{ marginBottom:14 }}>
+            <div className="mono" style={{ fontSize:9, color:COLORS.p3, letterSpacing:"0.1em", marginBottom:6, fontWeight:700 }}>
+              EXECUTION RESULT
+            </div>
+            <div className="mono" style={{ padding:"10px 14px", background:COLORS.p3+"10", border:`1px solid ${COLORS.p3}33`,
+              borderRadius:6, fontSize:11, color:COLORS.p3 }}>
+              {sections.execResult}
+            </div>
+          </div>
+        )}
+
+        {/* Fallback: raw resolution_notes if none of the above rendered */}
+        {!rootCause && !recFix && fixSteps.length === 0 && notes && (
+          <div style={{ marginBottom:14 }}>
+            <div className="mono" style={{ fontSize:9, color:COLORS.textDim, letterSpacing:"0.1em", marginBottom:6, fontWeight:700 }}>
+              RESOLUTION NOTES
+            </div>
+            <div style={{ padding:"12px 14px", background:COLORS.p3+"10", border:`1px solid ${COLORS.p3}33`,
+              borderRadius:6, fontSize:13, color:COLORS.p3, lineHeight:1.7, whiteSpace:"pre-wrap" }}>
+              {notes}
+            </div>
+          </div>
+        )}
+
+        {/* Meta */}
+        {ticket.resolution_time_hrs && (
+          <div className="mono" style={{ fontSize:10, color:COLORS.textDim, marginTop:6 }}>
+            Resolution time: {ticket.resolution_time_hrs}h
+          </div>
+        )}
+        {rca?.confidence_score != null && (
+          <div style={{ display:"flex", gap:12, marginTop:8 }}>
+            <div className="mono" style={{ fontSize:10, color:COLORS.textDim }}>
+              Confidence: {rca.confidence_score}%
+            </div>
+            {rca.risk_tier && (
+              <Badge label={rca.risk_tier} color={RISK_COLOR[rca.risk_tier] || COLORS.textDim} />
             )}
           </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ── RejectModal — used by Path B and Path C approval ──────────────────────────
+function RejectModal({ ticket, path, rca, onClose, onRejected }) {
+  const [reason, setReason] = useState("");
+  const [loading, setLoading] = useState(false);
+
+  async function handleReject() {
+    if (reason.length < 3) return;
+    setLoading(true);
+    const res = await apiFetch(`/tickets/${ticket.id}/reject_v2`, {
+      method: "POST",
+      body: JSON.stringify({
+        operator_id: "ops_dashboard",
+        reject_reason: reason,
+        approval_path: path,
+        rca_id: rca?.id || null,
+      }),
+    });
+    setLoading(false);
+    if (res?.status === "rejected") onRejected();
+    else onClose();
+  }
+
+  return (
+    <div onClick={e => { if (e.target === e.currentTarget) onClose(); }} style={{
+      position: "fixed", inset: 0, background: "rgba(0,0,0,0.8)",
+      zIndex: 300, display: "flex", alignItems: "center", justifyContent: "center",
+      animation: "fade-in 0.2s ease",
+    }}>
+      <div onClick={e => e.stopPropagation()} style={{
+        width: 480, background: COLORS.card, border: `1px solid ${COLORS.border}`,
+        borderRadius: 12, padding: 28, animation: "slide-in 0.25s ease",
+      }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 16 }}>
+          <span style={{ fontSize: 24 }}>⚠️</span>
+          <div style={{ fontSize: 16, fontWeight: 800, color: "#CC2244" }}>Reject Recommended Fix</div>
+        </div>
+        <div style={{ fontSize: 12, color: COLORS.textDim, marginBottom: 14, padding: "8px 12px",
+          background: COLORS.surface, borderRadius: 6 }}>
+          {ticket.description?.slice(0, 100)}...
+        </div>
+        <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 6 }}>Rejection Reason *</div>
+        <textarea value={reason} onChange={e => setReason(e.target.value)}
+          placeholder="Explain why this fix should not be applied..."
+          style={{
+            width: "100%", minHeight: 80, padding: "10px 12px", marginBottom: 14,
+            background: COLORS.surface, border: `1px solid ${COLORS.border}`,
+            borderRadius: 6, color: COLORS.text, fontSize: 12,
+            fontFamily: "inherit", resize: "vertical", outline: "none",
+          }} />
+        <div style={{ fontSize: 11, color: COLORS.textDim, marginBottom: 14, padding: "10px 12px",
+          background: "#CC224410", border: "1px solid #CC224433", borderRadius: 6 }}>
+          <div style={{ fontWeight: 700, marginBottom: 4, color: "#CC2244" }}>Consequences:</div>
+          <ul style={{ margin: 0, paddingLeft: 16, lineHeight: 1.8 }}>
+            <li>Ticket status → <b>rejected</b></li>
+            <li>AI confidence penalised −5pts for this fix type</li>
+            <li>Re-raise to engineer becomes available</li>
+            <li>Full audit trail entry created</li>
+          </ul>
+        </div>
+        <div style={{ display: "flex", gap: 10 }}>
+          <button onClick={handleReject} disabled={reason.length < 3 || loading} style={{
+            flex: 1, padding: "12px", background: reason.length >= 3 ? "#CC2244" : COLORS.border,
+            color: reason.length >= 3 ? "#fff" : COLORS.textDim,
+            border: "none", borderRadius: 6, fontSize: 13, fontWeight: 800,
+            cursor: reason.length >= 3 && !loading ? "pointer" : "not-allowed", fontFamily: "inherit",
+          }}>{loading ? <Spinner /> : "CONFIRM REJECT"}</button>
+          <button onClick={onClose} style={{
+            padding: "12px 18px", background: COLORS.surface, color: COLORS.textDim,
+            border: `1px solid ${COLORS.border}`, borderRadius: 6,
+            fontSize: 13, cursor: "pointer", fontFamily: "inherit",
+          }}>Cancel</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── ExecutionHistory — render inside RCADetail ────────────────────────────────
+function ExecutionHistory({ executions, ticketId, onRefresh }) {
+  const [expanded, setExpanded] = useState(false);
+  const [rollbackTarget, setRollbackTarget] = useState(null);
+
+  if (!executions.length) return null;
+
+  const OUTCOME_COLOR = { success: COLORS.p3, failed: COLORS.p1, rolled_back: "#FF6B35" };
+
+  return (
+    <Card style={{ padding: 20, marginTop: 12 }}>
+      <div onClick={() => setExpanded(!expanded)} style={{
+        display: "flex", justifyContent: "space-between", alignItems: "center", cursor: "pointer",
+      }}>
+        <div style={{ fontSize: 10, color: COLORS.textDim, letterSpacing: "0.1em", fontWeight: 700 }}>
+          EXECUTION HISTORY ({executions.length})
+        </div>
+        <span style={{ fontSize: 12, color: COLORS.textDim }}>{expanded ? "▲" : "▼"}</span>
+      </div>
+      {expanded && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 12 }}>
+          {executions.map(exe => {
+            let preState, postState;
+            try { preState = typeof exe.pre_state === "string" ? JSON.parse(exe.pre_state) : exe.pre_state || {}; } catch { preState = {}; }
+            try { postState = typeof exe.post_state === "string" ? JSON.parse(exe.post_state) : exe.post_state || {}; } catch { postState = {}; }
+            return (
+              <div key={exe.id} style={{
+                padding: "12px 14px", background: COLORS.surface,
+                borderRadius: 6, border: `1px solid ${COLORS.border}`,
+              }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+                  <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                    <span className="mono" style={{ fontSize: 10, color: COLORS.accent }}>{exe.id?.slice(0, 12)}</span>
+                    <Badge label={exe.fix_type || "unknown"} color={COLORS.accent} />
+                    <Badge label={exe.outcome || "unknown"} color={OUTCOME_COLOR[exe.outcome] || COLORS.textDim} />
+                  </div>
+                  {exe.outcome === "success" && !exe.rolled_back && (
+                    <button onClick={() => setRollbackTarget(exe)} style={{
+                      padding: "4px 12px", background: "#FF6B3522", color: "#FF6B35",
+                      border: "1px solid #FF6B3544", borderRadius: 4,
+                      fontSize: 10, fontWeight: 700, cursor: "pointer", fontFamily: "inherit",
+                    }}>↩ Rollback</button>
+                  )}
+                </div>
+                <div className="mono" style={{ fontSize: 10, color: COLORS.textDim }}>
+                  {exe.executed_at?.slice(0, 19) || "–"}
+                </div>
+              </div>
+            );
+          })}
         </div>
       )}
+      {rollbackTarget && (
+        <RollbackModal execution={rollbackTarget}
+          onClose={() => setRollbackTarget(null)}
+          onRolledBack={() => { setRollbackTarget(null); if (onRefresh) onRefresh(); }}
+        />)}
+    </Card>
+  );
+}
+
+// ── RollbackModal ─────────────────────────────────────────────────────────────
+function RollbackModal({ execution, onClose, onRolledBack }) {
+  const [reason, setReason] = useState("");
+  const [loading, setLoading] = useState(false);
+
+  let preState, postState;
+  try { preState = typeof execution.pre_state === "string" ? JSON.parse(execution.pre_state) : execution.pre_state || {}; } catch { preState = {}; }
+  try { postState = typeof execution.post_state === "string" ? JSON.parse(execution.post_state) : execution.post_state || {}; } catch { postState = {}; }
+
+  async function handleRollback() {
+    if (reason.length < 3) return;
+    setLoading(true);
+    const res = await apiFetch(`/executions/${execution.id}/rollback`, {
+      method: "POST",
+      body: JSON.stringify({ operator_id: "ops_dashboard", rollback_reason: reason }),
+    });
+    setLoading(false);
+    if (res?.status === "rolled_back") onRolledBack();
+    else onClose();
+  }
+
+  const allKeys = [...new Set([...Object.keys(preState), ...Object.keys(postState)])];
+
+  return (
+    <div onClick={e => { if (e.target === e.currentTarget) onClose(); }} style={{
+      position: "fixed", inset: 0, background: "rgba(0,0,0,0.8)",
+      zIndex: 300, display: "flex", alignItems: "center", justifyContent: "center",
+      animation: "fade-in 0.2s ease",
+    }}>
+      <div onClick={e => e.stopPropagation()} style={{
+        width: 540, maxHeight: "85vh", overflowY: "auto",
+        background: COLORS.card, border: `1px solid ${COLORS.border}`,
+        borderRadius: 12, padding: 28, animation: "slide-in 0.25s ease",
+      }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 16 }}>
+          <span style={{ fontSize: 24 }}>↩️</span>
+          <div style={{ fontSize: 16, fontWeight: 800, color: "#FF6B35" }}>Rollback Execution</div>
+        </div>
+        <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
+          <Badge label={execution.id?.slice(0, 12)} color={COLORS.accent} />
+          <Badge label={execution.fix_type} color={COLORS.accent} />
+        </div>
+
+        {/* Pre vs Post state diff */}
+        <div style={{ fontSize: 10, color: COLORS.textDim, letterSpacing: "0.1em", marginBottom: 8, fontWeight: 700 }}>STATE DIFF</div>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 1, marginBottom: 14,
+          background: COLORS.border, borderRadius: 6, overflow: "hidden", fontSize: 11 }}>
+          <div style={{ background: COLORS.surface, padding: "8px 10px", fontWeight: 700, color: COLORS.textDim }}>BEFORE</div>
+          <div style={{ background: COLORS.surface, padding: "8px 10px", fontWeight: 700, color: COLORS.textDim }}>AFTER</div>
+          {allKeys.map(k => (
+            <>{/* Fragment has key on parent div */}
+              <div key={`pre-${k}`} className="mono" style={{ background: COLORS.card, padding: "4px 10px", color: COLORS.text }}>
+                {k}: {JSON.stringify(preState[k] ?? "–")}
+              </div>
+              <div key={`post-${k}`} className="mono" style={{
+                background: COLORS.card, padding: "4px 10px",
+                color: JSON.stringify(preState[k]) !== JSON.stringify(postState[k]) ? COLORS.p2 : COLORS.text,
+              }}>
+                {k}: {JSON.stringify(postState[k] ?? "–")}
+              </div>
+            </>
+          ))}
+        </div>
+
+        <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 6 }}>Rollback Reason *</div>
+        <textarea value={reason} onChange={e => setReason(e.target.value)}
+          placeholder="Why is this rollback necessary?"
+          style={{
+            width: "100%", minHeight: 70, padding: "10px 12px", marginBottom: 14,
+            background: COLORS.surface, border: `1px solid ${COLORS.border}`,
+            borderRadius: 6, color: COLORS.text, fontSize: 12,
+            fontFamily: "inherit", resize: "vertical", outline: "none",
+          }} />
+        <div style={{ fontSize: 11, color: COLORS.textDim, marginBottom: 14, padding: "10px 12px",
+          background: "#FF6B3510", border: "1px solid #FF6B3533", borderRadius: 6 }}>
+          <div style={{ fontWeight: 700, marginBottom: 4, color: "#FF6B35" }}>Consequences:</div>
+          <ul style={{ margin: 0, paddingLeft: 16, lineHeight: 1.8 }}>
+            <li>Pre-state will be restored</li>
+            <li>AI confidence penalised −10pts for this fix type</li>
+            <li>Ticket status → <b>rolled_back</b></li>
+            <li>Re-raise to engineer enabled</li>
+            <li>Full audit trail entry created</li>
+          </ul>
+        </div>
+        <div style={{ display: "flex", gap: 10 }}>
+          <button onClick={handleRollback} disabled={reason.length < 3 || loading} style={{
+            flex: 1, padding: "12px", background: reason.length >= 3 ? "#FF6B35" : COLORS.border,
+            color: reason.length >= 3 ? "#fff" : COLORS.textDim,
+            border: "none", borderRadius: 6, fontSize: 13, fontWeight: 800,
+            cursor: reason.length >= 3 && !loading ? "pointer" : "not-allowed", fontFamily: "inherit",
+          }}>{loading ? <Spinner /> : "CONFIRM ROLLBACK"}</button>
+          <button onClick={onClose} style={{
+            padding: "12px 18px", background: COLORS.surface, color: COLORS.textDim,
+            border: `1px solid ${COLORS.border}`, borderRadius: 6,
+            fontSize: 13, cursor: "pointer", fontFamily: "inherit",
+          }}>Cancel</button>
+        </div>
+      </div>
     </div>
+  );
+}
+
+// ── ReraisePanel — for rolled_back/rejected tickets ───────────────────────────
+function ReraisePanel({ ticket }) {
+  const [engineer, setEngineer] = useState("L2_Support_Queue");
+  const [reason, setReason] = useState("Automated fix failed — requires expert review");
+  const [context, setContext] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [result, setResult] = useState(null);
+
+  const QUEUES = ["L2_Support_Queue", "L3_Infrastructure", "Database_Team", "Network_Ops", "Security_Ops"];
+
+  async function handleReraise() {
+    if (reason.length < 3) return;
+    setLoading(true);
+    const res = await apiFetch(`/tickets/${ticket.id}/reraise`, {
+      method: "POST",
+      body: JSON.stringify({
+        operator_id: "ops_dashboard",
+        reraise_reason: reason,
+        additional_context: context,
+        assigned_engineer: engineer,
+      }),
+    });
+    setLoading(false);
+    if (res?.status === "reraised") {
+      setResult(res);
+      setTimeout(() => {
+        if (typeof window.__setScreen === "function") window.__setScreen("feed");
+      }, 3000);
+    }
+  }
+
+  if (result) {
+    return (
+      <Card style={{ padding: 24, borderLeft: "3px solid #7B61FF", animation: "slide-in 0.3s ease" }}>
+        <div style={{ fontSize: 24, marginBottom: 8 }}>✅</div>
+        <div style={{ fontSize: 16, fontWeight: 800, color: "#7B61FF", marginBottom: 12 }}>TICKET ESCALATED</div>
+        <div style={{ fontSize: 13, color: COLORS.text, marginBottom: 8 }}>
+          A support engineer will pick this up from the <b style={{ color: "#7B61FF" }}>{result.assigned_to}</b> queue.
+        </div>
+        <div className="mono" style={{ fontSize: 11, color: COLORS.textDim }}>
+          {result.ticket_id} · This action has been logged to the audit trail.
+        </div>
+        <div className="mono" style={{ fontSize: 10, color: COLORS.textDim, marginTop: 8 }}>
+          Redirecting to Live Feed in 3s...
+        </div>
+      </Card>
+    );
+  }
+
+  return (
+    <Card style={{ padding: 20, borderLeft: "3px solid #7B61FF" }}>
+      <div style={{ fontSize: 10, color: "#7B61FF", letterSpacing: "0.1em", fontWeight: 700, marginBottom: 10 }}>
+        ESCALATE TO SUPPORT ENGINEER
+      </div>
+      <div style={{ fontSize: 12, color: COLORS.textDim, marginBottom: 14, lineHeight: 1.6 }}>
+        This ticket was <b style={{ color: STATUS_COLOR[ticket.status] || COLORS.textDim }}>{STATUS_LABEL[ticket.status] || ticket.status}</b> and
+        requires human expert review.
+      </div>
+      <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 6 }}>Engineer Queue</div>
+      <select value={engineer} onChange={e => setEngineer(e.target.value)} style={{
+        width: "100%", padding: "9px 12px", marginBottom: 14,
+        background: COLORS.surface, border: `1px solid ${COLORS.border}`,
+        borderRadius: 6, color: COLORS.text, fontSize: 12,
+        fontFamily: "inherit", outline: "none", cursor: "pointer",
+      }}>
+        {QUEUES.map(q => <option key={q} value={q}>{q}</option>)}
+      </select>
+      <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 6 }}>Re-raise Reason *</div>
+      <textarea value={reason} onChange={e => setReason(e.target.value)} style={{
+        width: "100%", minHeight: 50, padding: "10px 12px", marginBottom: 14,
+        background: COLORS.surface, border: `1px solid ${COLORS.border}`,
+        borderRadius: 6, color: COLORS.text, fontSize: 12,
+        fontFamily: "inherit", resize: "vertical", outline: "none",
+      }} />
+      <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 6 }}>Additional Context (optional)</div>
+      <textarea value={context} onChange={e => setContext(e.target.value)}
+        placeholder="Describe any new observations, error codes, or context since the last attempt..."
+        style={{
+          width: "100%", minHeight: 50, padding: "10px 12px", marginBottom: 16,
+          background: COLORS.surface, border: `1px solid ${COLORS.border}`,
+          borderRadius: 6, color: COLORS.text, fontSize: 12,
+          fontFamily: "inherit", resize: "vertical", outline: "none",
+        }} />
+      <button onClick={handleReraise} disabled={reason.length < 3 || loading} style={{
+        width: "100%", padding: "14px", background: reason.length >= 3 ? "#7B61FF" : COLORS.border,
+        color: reason.length >= 3 ? "#fff" : COLORS.textDim,
+        border: "none", borderRadius: 8, fontSize: 14, fontWeight: 800,
+        cursor: reason.length >= 3 && !loading ? "pointer" : "not-allowed", fontFamily: "inherit",
+      }}>
+        {loading ? <span style={{ display:"flex",alignItems:"center",justifyContent:"center",gap:8 }}><Spinner /> Escalating...</span>
+          : "RE-RAISE TO ENGINEER"}
+      </button>
+    </Card>
   );
 }
 

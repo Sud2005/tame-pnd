@@ -244,26 +244,65 @@ def add_to_index(ticket: dict):
 
 # ── Semantic search ───────────────────────────────────────────────────────────
 
-def search_similar(description: str, k: int = 5) -> list[dict]:
+def search_similar(description: str, k: int = 5, exclude_ticket_id: str = None) -> list[dict]:
     """
     Finds k most similar resolved incidents to the given description.
+    Over-fetches candidates, deduplicates by description overlap,
+    excludes self-matches, and prefers results with resolution notes.
     Returns list of dicts with ticket data + similarity_score.
     """
     index, store = get_index()
 
+    # Over-fetch to allow deduplication
+    fetch_k = min(k * 4, index.ntotal)
     query_vec = embed_text(description).reshape(1, -1)
-    scores, indices = index.search(query_vec, k=min(k, index.ntotal))
+    scores, indices = index.search(query_vec, k=fetch_k)
 
-    results = []
+    def _word_set(text):
+        return set((text or "").lower().split())
+
+    def _overlap(a_words, b_words):
+        if not a_words or not b_words:
+            return 0.0
+        common = a_words & b_words
+        return len(common) / max(len(a_words), len(b_words))
+
+    candidates = []
     for score, idx in zip(scores[0], indices[0]):
         if idx == -1:
             continue
         ticket = store[idx].copy()
-        # Cosine similarity is in [-1, 1] after L2 norm; clamp to [0, 1]
+        # Skip self-match
+        if exclude_ticket_id and ticket.get("id") == exclude_ticket_id:
+            continue
         sim_score = max(0.0, min(1.0, float(score)))
         ticket["similarity_score"] = round(sim_score, 4)
         ticket["similarity_pct"]   = round(sim_score * 100, 1)
-        results.append(ticket)
+        candidates.append(ticket)
+
+    # Deduplicate: skip candidates whose description overlaps >80% with an already-selected result
+    results = []
+    selected_word_sets = []
+    # Sort: prefer candidates with resolution notes first, then by similarity
+    def _sort_key(t):
+        has_res = 1 if (t.get("resolution_notes") and str(t["resolution_notes"]).lower() not in ("nan","none","")) else 0
+        return (-has_res, -t.get("similarity_score", 0))
+    candidates.sort(key=_sort_key)
+
+    for c in candidates:
+        if len(results) >= k:
+            break
+        c_words = _word_set(c.get("description", ""))
+        # Check overlap with already-selected results
+        too_similar = False
+        for sw in selected_word_sets:
+            if _overlap(c_words, sw) > 0.80:
+                too_similar = True
+                break
+        if too_similar:
+            continue
+        results.append(c)
+        selected_word_sets.append(c_words)
 
     return results
 
@@ -476,7 +515,7 @@ def run_rca(ticket_id: str) -> dict:
     try:
         # ── Step 1: FAISS semantic search ─────────────────────────────────────
         description = ticket.get("description", "")
-        similar     = search_similar(description, k=5)
+        similar     = search_similar(description, k=5, exclude_ticket_id=ticket_id)
 
         if not similar:
             raise RuntimeError("No similar incidents found in index")
@@ -504,7 +543,7 @@ def run_rca(ticket_id: str) -> dict:
                 {"role": "user", "content": prompt}
             ],
             temperature=0.3,
-            max_tokens=800,
+            max_tokens=1500,
         )
 
         raw = response.choices[0].message.content
@@ -577,9 +616,10 @@ def run_rca(ticket_id: str) -> dict:
             now,
         ))
 
-        # Update ticket status to pending_approval
+        # Update ticket status to pending_approval ONLY if still open
+        # (auto_approve_low_risk may have already resolved it)
         conn.execute(
-            "UPDATE tickets SET status='pending_approval' WHERE id=?",
+            "UPDATE tickets SET status='pending_approval' WHERE id=? AND status='open'",
             (ticket_id,)
         )
 
