@@ -229,6 +229,11 @@ function TicketFeed({ onSelectTicket, selected }) {
     const wsUrl = API.replace(/^http/, "ws") + "/ws";
     let ws;
     let fallbackInterval = null;
+    let reconnectTimeout = null;
+
+    function startPolling() {
+      if (!fallbackInterval) fallbackInterval = setInterval(load, 3000);
+    }
 
     function connectWs() {
       try {
@@ -249,17 +254,23 @@ function TicketFeed({ onSelectTicket, selected }) {
 
         ws.onerror = () => {
           setWsStatus("polling");
-          // start polling fallback only once
-          if (!fallbackInterval) fallbackInterval = setInterval(load, 5000);
+          startPolling();
         };
 
         ws.onclose = () => {
           setWsStatus("polling");
-          if (!fallbackInterval) fallbackInterval = setInterval(load, 5000);
+          startPolling();
+          // attempt WS reconnect after 10s (clear any existing timeout first)
+          if (reconnectTimeout) clearTimeout(reconnectTimeout);
+          reconnectTimeout = setTimeout(() => {
+            reconnectTimeout = null;
+            if (fallbackInterval) { clearInterval(fallbackInterval); fallbackInterval = null; }
+            connectWs();
+          }, 10000);
         };
       } catch {
         setWsStatus("polling");
-        if (!fallbackInterval) fallbackInterval = setInterval(load, 5000);
+        startPolling();
       }
     }
 
@@ -268,6 +279,7 @@ function TicketFeed({ onSelectTicket, selected }) {
     return () => {
       if (wsRef.current) wsRef.current.close();
       if (fallbackInterval) clearInterval(fallbackInterval);
+      if (reconnectTimeout) clearTimeout(reconnectTimeout);
     };
   }, [filter, load]);
 
@@ -2278,7 +2290,10 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    apiFetch("/health").then(d => setApiOk(d?.status === "ok"));
+    const check = () => apiFetch("/health").then(d => setApiOk(d?.status === "ok"));
+    check();
+    const interval = setInterval(check, 15000);
+    return () => clearInterval(interval);
   }, []);
 
   // Expose setScreen globally so result screen "View Audit Trail" button works
