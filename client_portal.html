@@ -134,6 +134,7 @@
   .badge-resolved   { background: rgba(0,230,118,.12);  color: var(--p3); border: 1px solid rgba(0,230,118,.25); }
   .badge-escalated  { background: rgba(255,59,92,.12);  color: var(--p1); border: 1px solid rgba(255,59,92,.25); }
   .badge-pending    { background: rgba(0,212,255,.12);  color: var(--accent); border: 1px solid rgba(0,212,255,.25); }
+  .badge-rejected   { background: rgba(204,34,68,.12);  color: #CC2244; border: 1px solid rgba(204,34,68,.3); }
 
   /* Ticket row */
   .ticket-row {
@@ -377,6 +378,7 @@
           <option value="open">Open</option>
           <option value="pending_approval">Pending</option>
           <option value="escalated">Escalated</option>
+          <option value="rejected">Rejected</option>
           <option value="resolved">Resolved</option>
         </select>
       </div>
@@ -627,6 +629,7 @@ function getStatusClass(s) {
   if (s === 'resolved')        return 'resolved';
   if (s === 'escalated')       return 'escalated';
   if (s === 'pending_approval')return 'pending';
+  if (s === 'rejected')        return 'rejected';
   return 'open';
 }
 
@@ -683,7 +686,7 @@ async function openTicketDetail(ticket) {
       <!-- Action buttons -->
       <div class="divider"></div>
       <div class="flex-row">
-        ${ticket.status !== 'escalated' && ticket.status !== 'resolved' ? `
+        ${ticket.status !== 'escalated' && ticket.status !== 'resolved' && ticket.status !== 'rejected' ? `
           <button class="btn btn-warn" onclick="escalateTicket('${ticket.id}')" style="font-size:12px">
             🚨 Request Engineer Support
           </button>` : ''}
@@ -696,7 +699,11 @@ async function openTicketDetail(ticket) {
           </div>` : ''}
         ${ticket.status === 'resolved' ? `
           <div style="padding:8px 14px;background:rgba(0,230,118,.1);border:1px solid rgba(0,230,118,.25);border-radius:6px;font-size:12px;color:var(--p3)">
-            ✓ Ticket resolved
+            ✓ Issue resolved — ticket closed
+          </div>` : ''}
+        ${ticket.status === 'rejected' ? `
+          <div style="padding:8px 14px;background:rgba(204,34,68,.1);border:1px solid rgba(204,34,68,.3);border-radius:6px;font-size:12px;color:#CC2244">
+            ✕ Proposed fix was rejected by the support team — a new resolution is being sought
           </div>` : ''}
       </div>
     </div>`;
@@ -708,10 +715,16 @@ function buildTimeline(ticket, rca) {
     { label: 'AI Classification',  done: !!ticket.severity,  icon: '🧠', detail: `${ticket.severity} · ${ticket.category}` },
     { label: 'Root Cause Analysis',done: !!rca,              icon: '🔍', detail: rca ? 'Analysis complete' : 'In progress...' },
     { label: 'Solution Generated', done: !!rca?.recommended_fix, icon: '💡', detail: rca?.recommended_fix?.slice(0,60)||'Pending' },
-    { label: ticket.status==='resolved' ? 'Resolved' : ticket.status==='escalated' ? 'Escalated to Engineer' : 'Awaiting Action',
-      done: ticket.status==='resolved'||ticket.status==='escalated',
-      icon: ticket.status==='resolved'?'✅':ticket.status==='escalated'?'🚨':'⏳',
-      detail: ticket.status==='resolved'? 'Issue resolved' : ticket.status==='escalated'? 'Engineer team notified' : 'Pending' },
+    { label: ticket.status==='resolved' ? 'Resolved'
+           : ticket.status==='escalated' ? 'Escalated to Engineer'
+           : ticket.status==='rejected'  ? 'Fix Rejected'
+           : 'Awaiting Action',
+      done: ticket.status==='resolved'||ticket.status==='escalated'||ticket.status==='rejected',
+      icon: ticket.status==='resolved'?'✅':ticket.status==='escalated'?'🚨':ticket.status==='rejected'?'🚫':'⏳',
+      detail: ticket.status==='resolved'? 'Issue resolved'
+            : ticket.status==='escalated'? 'Engineer team notified'
+            : ticket.status==='rejected'? 'Fix not approved — awaiting new resolution'
+            : 'Pending' },
   ];
 
   return `<div class="timeline">${steps.map((s,i) => `
@@ -984,50 +997,79 @@ function speakText(text) {
 }
 
 // ── Speech Recognition (Web Speech API — completely free) ─────────────────────
+// Check support once; create a fresh instance on every start to avoid
+// repeated permission prompts and stale session errors.
+const _SpeechRec = window.SpeechRecognition || window.webkitSpeechRecognition;
+
 function setupSpeechRecognition() {
-  const SpeechRec = window.SpeechRecognition || window.webkitSpeechRecognition;
-  if (!SpeechRec) return;
-
-  recognition = new SpeechRec();
-  recognition.continuous    = false;
-  recognition.interimResults= false;
-  recognition.lang          = 'en-US';
-
-  recognition.onresult = (e) => {
-    const transcript = e.results[0][0].transcript;
-    document.getElementById('voiceInput').value = transcript;
-    sendChat();
-  };
-  recognition.onend = () => {
-    isListening = false;
-    const btn   = document.getElementById('micBtn');
-    btn.className   = 'mic-btn idle';
-    btn.textContent = '🎙️';
-  };
-  recognition.onerror = () => {
-    isListening = false;
-    document.getElementById('micBtn').className = 'mic-btn idle';
-    document.getElementById('micBtn').textContent = '🎙️';
-  };
+  // Nothing to initialise ahead of time — instances are created per session.
 }
 
 function toggleMic() {
-  if (!recognition) {
+  if (!_SpeechRec) {
     alert('Voice input not supported in this browser. Try Chrome or Edge.');
     return;
   }
   const btn = document.getElementById('micBtn');
   if (isListening) {
-    recognition.stop();
+    // Stop current session
+    if (recognition) { try { recognition.abort(); } catch(e) {} recognition = null; }
     isListening = false;
     btn.className   = 'mic-btn idle';
     btn.textContent = '🎙️';
-  } else {
+    return;
+  }
+
+  // Create a fresh recognition instance each time to avoid stale-session
+  // errors that would cause the browser to re-prompt for microphone access.
+  recognition = new _SpeechRec();
+  recognition.continuous     = false;
+  recognition.interimResults = false;
+  recognition.lang           = 'en-US';
+  recognition.maxAlternatives = 1;
+
+  recognition.onresult = (e) => {
+    // Collect all final results (handles both single and multi-segment speech)
+    let transcript = '';
+    for (let i = 0; i < e.results.length; i++) {
+      if (e.results[i].isFinal) transcript += e.results[i][0].transcript;
+    }
+    transcript = transcript.trim();
+    if (transcript) {
+      document.getElementById('voiceInput').value = transcript;
+      sendChat();
+    }
+  };
+
+  recognition.onend = () => {
+    isListening = false;
+    recognition = null;
+    const b = document.getElementById('micBtn');
+    if (b) { b.className = 'mic-btn idle'; b.textContent = '🎙️'; }
+  };
+
+  recognition.onerror = (e) => {
+    isListening = false;
+    recognition = null;
+    const b = document.getElementById('micBtn');
+    if (b) { b.className = 'mic-btn idle'; b.textContent = '🎙️'; }
+    if (e.error === 'not-allowed' || e.error === 'permission-denied') {
+      addBotMsg('⚠️ Microphone access denied. Please allow microphone access in your browser settings, then try again.');
+    } else if (e.error !== 'aborted' && e.error !== 'no-speech') {
+      addBotMsg(`⚠️ Voice input error (${e.error}). Please try again.`);
+    }
+  };
+
+  try {
     recognition.start();
     isListening = true;
     btn.className   = 'mic-btn active';
     btn.textContent = '⏹';
-    addBotMsg("Listening... speak your question.");
+    addBotMsg('🎙️ Listening… speak your question now.');
+  } catch(err) {
+    isListening = false;
+    recognition = null;
+    addBotMsg('⚠️ Could not start microphone. Please check your browser permissions and try again.');
   }
 }
 </script>

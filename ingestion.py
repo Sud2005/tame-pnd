@@ -632,8 +632,8 @@ def reject_ticket_v2(ticket_id: str, body: RejectV2Request):
         confidence, risk_tier, now,
     ))
 
-    # Keep ticket open / mark status as open
-    conn.execute("UPDATE tickets SET status='open' WHERE id=?", (ticket_id,))
+    # Mark ticket as rejected so clients can see the rejection state
+    conn.execute("UPDATE tickets SET status='rejected' WHERE id=?", (ticket_id,))
 
     # Update fix_outcomes reject count
     conn.execute("""
@@ -650,9 +650,9 @@ def reject_ticket_v2(ticket_id: str, body: RejectV2Request):
                 outcome="rejected")
     conn.commit(); conn.close()
     return {
-        "message":      f"Fix rejected. Ticket {ticket_id} remains open.",
+        "message":      f"Fix rejected. Ticket {ticket_id} marked as rejected.",
         "approval_id":  approval_id,
-        "ticket_status": "open",
+        "ticket_status": "rejected",
         "status":       "rejected",
         "outcome":      "rejected",
     }
@@ -674,6 +674,45 @@ def cancel_auto(ticket_id: str, body: dict):
                 outcome="cancelled")
     conn.commit(); conn.close()
     return {"message": f"Auto-execution cancelled for {ticket_id}", "outcome": "cancelled"}
+
+
+@app.post("/tickets/{ticket_id}/reraise")
+def reraise_ticket(ticket_id: str, body: dict):
+    """
+    Re-raise a rolled_back or rejected ticket to a specific support engineer queue.
+    Called from the ReraisePanel in the main dashboard.
+    Sets status to 'reraised' and assigns to the chosen engineer queue.
+    """
+    conn = get_db()
+    row  = conn.execute("SELECT * FROM tickets WHERE id=?", (ticket_id,)).fetchone()
+    if not row:
+        conn.close(); raise HTTPException(404, f"Ticket {ticket_id} not found")
+
+    operator_id      = body.get("operator_id", "ops_dashboard")
+    reraise_reason   = (body.get("reraise_reason", "Ticket requires further review") or "")[:200]
+    additional_ctx   = (body.get("additional_context", "") or "")[:200]
+    assigned_engineer= body.get("assigned_engineer", "L2_Support_Queue")
+    now              = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    conn.execute("""
+        UPDATE tickets SET status='reraised', assigned_group=? WHERE id=?
+    """, (assigned_engineer, ticket_id))
+
+    write_audit(conn, "RERAISE", ticket_id,
+                operator_id=operator_id,
+                action_taken=f"Re-raised to {assigned_engineer}",
+                reasoning=f"{reraise_reason}. Context: {additional_ctx}",
+                outcome="reraised")
+    conn.commit(); conn.close()
+
+    return {
+        "status":      "reraised",
+        "ticket_id":   ticket_id,
+        "assigned_to": assigned_engineer,
+        "operator_id": operator_id,
+        "reason":      reraise_reason,
+        "timestamp":   now,
+    }
 
 
 @app.get("/tickets/{ticket_id}/executions")
