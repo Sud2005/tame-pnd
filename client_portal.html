@@ -1,0 +1,1035 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>TamePND — Support Portal</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Syne:wght@400;600;700;800&display=swap');
+
+  :root {
+    --bg:       #0A0E1A;
+    --surface:  #0F1628;
+    --card:     #141D35;
+    --border:   #1E2D50;
+    --accent:   #00D4FF;
+    --p1:       #FF3B5C;
+    --p2:       #FFB020;
+    --p3:       #00E676;
+    --text:     #E8EDF8;
+    --dim:      #6B7A9E;
+    --success:  #00E676;
+    --danger:   #FF3B5C;
+  }
+
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  html { font-size: 16px; }
+  body {
+    background: var(--bg); color: var(--text);
+    font-family: 'Syne', sans-serif;
+    min-height: 100vh;
+  }
+  .mono { font-family: 'JetBrains Mono', monospace; }
+
+  /* Scrollbar */
+  ::-webkit-scrollbar { width: 4px; }
+  ::-webkit-scrollbar-track { background: var(--surface); }
+  ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+  /* Animations */
+  @keyframes fadeIn   { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+  @keyframes pulse    { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
+  @keyframes spin     { to { transform: rotate(360deg); } }
+  @keyframes glow     { 0%,100% { box-shadow: 0 0 0 0 rgba(0,212,255,.4); } 70% { box-shadow: 0 0 0 12px rgba(0,212,255,0); } }
+  @keyframes voicePulse { 0%,100% { transform: scale(1); } 50% { transform: scale(1.08); } }
+  .fade-in { animation: fadeIn 0.3s ease forwards; }
+
+  /* Layout */
+  .app { display: flex; flex-direction: column; min-height: 100vh; }
+
+  /* Header */
+  .header {
+    height: 52px; display: flex; align-items: center; justify-content: space-between;
+    padding: 0 28px; background: var(--surface); border-bottom: 1px solid var(--border);
+    position: sticky; top: 0; z-index: 50;
+  }
+  .logo { font-size: 16px; font-weight: 800; letter-spacing: -.02em; }
+  .logo span:first-child { color: var(--accent); }
+  .logo span:last-child  { color: var(--dim); }
+  .header-tag {
+    font-family: 'JetBrains Mono', monospace; font-size: 9px;
+    letter-spacing: .12em; color: var(--dim);
+    padding: 3px 8px; border: 1px solid var(--border); border-radius: 3px;
+  }
+  .api-status { display: flex; align-items: center; gap: 8px; font-size: 10px; color: var(--dim); font-family: monospace; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--dim); }
+  .dot.live { background: var(--p3); animation: pulse 2s infinite; }
+
+  /* Nav tabs */
+  .nav-tabs {
+    display: flex; gap: 4px; padding: 16px 28px 0;
+    border-bottom: 1px solid var(--border); background: var(--surface);
+  }
+  .tab {
+    padding: 8px 20px; border-radius: 6px 6px 0 0;
+    border: 1px solid transparent; border-bottom: none;
+    background: transparent; color: var(--dim);
+    font-family: 'Syne', sans-serif; font-size: 12px; font-weight: 700;
+    cursor: pointer; letter-spacing: .04em; transition: all .15s;
+  }
+  .tab.active {
+    background: var(--card); border-color: var(--border);
+    color: var(--accent); border-bottom-color: var(--card);
+  }
+  .tab:hover:not(.active) { color: var(--text); background: var(--card); }
+
+  /* Main */
+  .main { flex: 1; padding: 24px 28px; max-width: 900px; margin: 0 auto; width: 100%; }
+
+  /* Card */
+  .card {
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: 10px; padding: 20px;
+  }
+  .card + .card { margin-top: 16px; }
+
+  /* Form elements */
+  .field { margin-bottom: 14px; }
+  .label { font-size: 10px; font-family: monospace; letter-spacing: .1em; color: var(--dim); display: block; margin-bottom: 6px; }
+  input[type=text], textarea, select {
+    width: 100%; padding: 10px 14px;
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 6px; color: var(--text); font-family: 'Syne', sans-serif;
+    font-size: 13px; outline: none; transition: border-color .2s;
+  }
+  input:focus, textarea:focus, select:focus { border-color: var(--accent); }
+  textarea { resize: vertical; min-height: 80px; }
+  select option { background: var(--surface); }
+
+  /* Buttons */
+  .btn {
+    padding: 11px 22px; border: none; border-radius: 6px;
+    font-family: 'Syne', sans-serif; font-size: 13px; font-weight: 700;
+    cursor: pointer; transition: all .15s; display: inline-flex;
+    align-items: center; gap: 8px;
+  }
+  .btn-primary { background: var(--accent); color: var(--bg); }
+  .btn-primary:hover { opacity: .88; }
+  .btn-primary:disabled { background: var(--border); color: var(--dim); cursor: not-allowed; }
+  .btn-danger  { background: var(--p1); color: #fff; }
+  .btn-warn    { background: var(--p2); color: var(--bg); }
+  .btn-ghost   { background: var(--surface); color: var(--dim); border: 1px solid var(--border); }
+  .btn-ghost:hover { color: var(--text); }
+
+  /* Badges */
+  .badge {
+    display: inline-block; padding: 2px 10px; border-radius: 4px;
+    font-family: monospace; font-size: 10px; font-weight: 700;
+    letter-spacing: .08em; white-space: nowrap;
+  }
+  .badge-p1  { background: rgba(255,59,92,.15);  color: var(--p1); border: 1px solid rgba(255,59,92,.3); }
+  .badge-p2  { background: rgba(255,176,32,.15); color: var(--p2); border: 1px solid rgba(255,176,32,.3); }
+  .badge-p3  { background: rgba(0,230,118,.15);  color: var(--p3); border: 1px solid rgba(0,230,118,.3); }
+  .badge-open       { background: rgba(255,176,32,.12); color: var(--p2); border: 1px solid rgba(255,176,32,.25); }
+  .badge-resolved   { background: rgba(0,230,118,.12);  color: var(--p3); border: 1px solid rgba(0,230,118,.25); }
+  .badge-escalated  { background: rgba(255,59,92,.12);  color: var(--p1); border: 1px solid rgba(255,59,92,.25); }
+  .badge-pending    { background: rgba(0,212,255,.12);  color: var(--accent); border: 1px solid rgba(0,212,255,.25); }
+
+  /* Ticket row */
+  .ticket-row {
+    border: 1px solid var(--border); border-radius: 8px;
+    padding: 14px 16px; margin-bottom: 10px;
+    background: var(--card); cursor: pointer;
+    transition: all .15s; border-left: 3px solid var(--border);
+  }
+  .ticket-row:hover { border-color: var(--accent); }
+  .ticket-row.selected { border-color: var(--accent); background: rgba(0,212,255,.06); }
+  .ticket-row.sev-P1 { border-left-color: var(--p1); }
+  .ticket-row.sev-P2 { border-left-color: var(--p2); }
+  .ticket-row.sev-P3 { border-left-color: var(--p3); }
+
+  /* Spinner */
+  .spinner {
+    width: 16px; height: 16px; border: 2px solid var(--border);
+    border-top-color: var(--accent); border-radius: 50%;
+    animation: spin .7s linear infinite; display: inline-block;
+  }
+
+  /* Voice assistant */
+  .voice-panel {
+    position: fixed; bottom: 28px; right: 28px;
+    width: 360px; background: var(--card);
+    border: 1px solid var(--border); border-radius: 14px;
+    box-shadow: 0 8px 40px rgba(0,0,0,.6);
+    z-index: 100; display: none;
+    flex-direction: column; overflow: hidden;
+    max-height: 520px;
+  }
+  .voice-panel.open { display: flex; animation: fadeIn .25s ease; }
+
+  .voice-header {
+    padding: 14px 16px; background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; justify-content: space-between;
+  }
+  .voice-title { font-size: 13px; font-weight: 700; }
+  .voice-subtitle { font-size: 10px; color: var(--dim); margin-top: 2px; }
+
+  .voice-messages {
+    flex: 1; overflow-y: auto; padding: 12px 14px;
+    display: flex; flex-direction: column; gap: 10px;
+    max-height: 300px;
+  }
+  .msg { max-width: 88%; padding: 10px 14px; border-radius: 8px; font-size: 12px; line-height: 1.6; }
+  .msg-bot { background: var(--surface); border: 1px solid var(--border); align-self: flex-start; }
+  .msg-user {
+    background: rgba(0,212,255,.15); border: 1px solid rgba(0,212,255,.3);
+    align-self: flex-end; text-align: right;
+  }
+  .msg-system {
+    background: rgba(255,59,92,.1); border: 1px solid rgba(255,59,92,.25);
+    align-self: center; text-align: center; font-size: 11px; color: var(--p1);
+  }
+
+  .voice-input-area {
+    padding: 12px 14px; border-top: 1px solid var(--border);
+    display: flex; gap: 8px; align-items: flex-end;
+  }
+  .voice-input-area textarea {
+    flex: 1; min-height: 38px; max-height: 80px; font-size: 12px; padding: 8px 10px;
+  }
+
+  /* Voice mic button */
+  .mic-btn {
+    width: 38px; height: 38px; border-radius: 50%;
+    border: none; cursor: pointer;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 16px; transition: all .2s; flex-shrink: 0;
+  }
+  .mic-btn.idle    { background: var(--border); }
+  .mic-btn.active  { background: var(--p1); animation: voicePulse 1s infinite; }
+  .mic-btn.loading { background: var(--accent); }
+
+  /* Voice trigger */
+  .voice-trigger {
+    position: fixed; bottom: 28px; right: 28px;
+    width: 52px; height: 52px; border-radius: 50%;
+    background: var(--accent); color: var(--bg);
+    border: none; cursor: pointer; font-size: 22px;
+    display: flex; align-items: center; justify-content: center;
+    box-shadow: 0 4px 20px rgba(0,212,255,.4);
+    z-index: 99; animation: glow 3s infinite;
+    transition: transform .2s;
+  }
+  .voice-trigger:hover { transform: scale(1.08); }
+
+  /* Status timeline */
+  .timeline { display: flex; flex-direction: column; gap: 0; }
+  .timeline-item {
+    display: flex; gap: 14px; align-items: flex-start; padding-bottom: 16px;
+    position: relative;
+  }
+  .timeline-item:not(:last-child)::before {
+    content: ''; position: absolute; left: 15px; top: 30px;
+    width: 2px; bottom: 0; background: var(--border);
+  }
+  .timeline-dot {
+    width: 30px; height: 30px; border-radius: 50%; flex-shrink: 0;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 13px; border: 2px solid var(--border);
+  }
+  .timeline-dot.done  { background: rgba(0,230,118,.2); border-color: var(--p3); }
+  .timeline-dot.active{ background: rgba(0,212,255,.2); border-color: var(--accent); }
+  .timeline-dot.pending{ background: var(--surface); }
+
+  /* Solution box */
+  .solution-box {
+    background: rgba(0,230,118,.06); border: 1px solid rgba(0,230,118,.25);
+    border-radius: 8px; padding: 16px;
+  }
+  .solution-step {
+    display: flex; gap: 12px; align-items: flex-start; padding: 8px 0;
+    border-bottom: 1px solid rgba(0,230,118,.1);
+  }
+  .solution-step:last-child { border-bottom: none; }
+  .step-num {
+    width: 22px; height: 22px; border-radius: 50%;
+    background: rgba(0,230,118,.2); color: var(--p3);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 10px; font-weight: 700; flex-shrink: 0; margin-top: 2px;
+  }
+  .escalate-box {
+    background: rgba(255,59,92,.06); border: 1px solid rgba(255,59,92,.25);
+    border-radius: 8px; padding: 16px; margin-top: 12px;
+  }
+
+  /* Section header */
+  .section-title { font-size: 16px; font-weight: 800; margin-bottom: 4px; }
+  .section-sub   { font-size: 12px; color: var(--dim); margin-bottom: 16px; }
+  .divider { height: 1px; background: var(--border); margin: 16px 0; }
+  .flex-row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .meta { font-family: monospace; font-size: 10px; color: var(--dim); margin-top: 4px; }
+  .empty { text-align: center; padding: 40px; color: var(--dim); font-size: 13px; }
+
+  @media (max-width: 640px) {
+    .main { padding: 16px; }
+    .voice-panel { width: calc(100vw - 32px); right: 16px; bottom: 16px; }
+    .grid-2 { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+<div class="app">
+
+  <!-- Header -->
+  <header class="header">
+    <div style="display:flex;align-items:center;gap:14px">
+      <div class="logo"><span>TAME</span><span>PND</span></div>
+      <div class="header-tag">SUPPORT PORTAL</div>
+    </div>
+    <div class="api-status">
+      <div class="dot" id="apiDot"></div>
+      <span id="apiStatusText">Connecting...</span>
+    </div>
+  </header>
+
+  <!-- Nav -->
+  <div class="nav-tabs">
+    <button class="tab active" onclick="switchTab('submit')">📋 Raise Ticket</button>
+    <button class="tab" onclick="switchTab('tickets')">🎫 My Tickets</button>
+    <button class="tab" onclick="switchTab('escalated')">🚨 Escalated</button>
+  </div>
+
+  <!-- Main content -->
+  <div class="main">
+
+    <!-- ── Tab 1: Submit Ticket ───────────────────────────────────────────── -->
+    <div id="tab-submit">
+      <div class="section-title">Raise a Support Ticket</div>
+      <div class="section-sub">Describe your issue — our AI will classify and route it automatically</div>
+
+      <div class="card">
+        <div class="field">
+          <label class="label">YOUR NAME</label>
+          <input type="text" id="userName" placeholder="e.g. Priya Mehta" />
+        </div>
+        <div class="field">
+          <label class="label">CONTACT / EMAIL</label>
+          <input type="text" id="userContact" placeholder="e.g. priya@company.com" />
+        </div>
+        <div class="field">
+          <label class="label">DESCRIBE YOUR ISSUE *</label>
+          <textarea id="issueDesc" placeholder="Be as detailed as possible — what happened, when it started, what you've already tried..." rows="4"></textarea>
+        </div>
+        <div class="grid-2">
+          <div class="field">
+            <label class="label">SYSTEM / APPLICATION AFFECTED</label>
+            <input type="text" id="systemAffected" placeholder="e.g. Web Portal, Email, VPN..." />
+          </div>
+          <div class="field">
+            <label class="label">HOW URGENT IS THIS?</label>
+            <select id="urgency">
+              <option value="4">Low — can wait</option>
+              <option value="3" selected>Medium — affecting my work</option>
+              <option value="2">High — team affected</option>
+              <option value="1">Critical — total blockage</option>
+            </select>
+          </div>
+        </div>
+
+        <!-- Quick issue presets -->
+        <div style="margin-bottom:14px">
+          <div class="label">QUICK PRESETS (click to fill)</div>
+          <div style="display:flex;gap:6px;flex-wrap:wrap">
+            <button class="btn btn-ghost" style="font-size:11px;padding:5px 11px" onclick="fillPreset('vpn')">🌐 VPN Issue</button>
+            <button class="btn btn-ghost" style="font-size:11px;padding:5px 11px" onclick="fillPreset('email')">📧 Email Down</button>
+            <button class="btn btn-ghost" style="font-size:11px;padding:5px 11px" onclick="fillPreset('slow')">🐌 System Slow</button>
+            <button class="btn btn-ghost" style="font-size:11px;padding:5px 11px" onclick="fillPreset('login')">🔐 Can't Login</button>
+            <button class="btn btn-ghost" style="font-size:11px;padding:5px 11px" onclick="fillPreset('crash')">💥 App Crash</button>
+          </div>
+        </div>
+
+        <button class="btn btn-primary" id="submitBtn" onclick="submitTicket()" style="width:100%">
+          ▶ SUBMIT TICKET
+        </button>
+
+        <!-- Submit result -->
+        <div id="submitResult" style="display:none;margin-top:14px"></div>
+      </div>
+    </div>
+
+    <!-- ── Tab 2: My Tickets ──────────────────────────────────────────────── -->
+    <div id="tab-tickets" style="display:none">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px">
+        <div>
+          <div class="section-title">My Tickets</div>
+          <div class="section-sub">Live status — updates every 10 seconds</div>
+        </div>
+        <button class="btn btn-ghost" onclick="loadMyTickets()" style="font-size:12px">↻ Refresh</button>
+      </div>
+
+      <!-- Search + filter -->
+      <div style="display:flex;gap:10px;margin-bottom:16px">
+        <input type="text" id="ticketSearch" placeholder="Search by ID or description..." style="flex:1;font-size:12px" oninput="filterTickets()" />
+        <select id="statusFilter" onchange="filterTickets()" style="width:140px;font-size:12px">
+          <option value="">All Statuses</option>
+          <option value="open">Open</option>
+          <option value="pending_approval">Pending</option>
+          <option value="escalated">Escalated</option>
+          <option value="resolved">Resolved</option>
+        </select>
+      </div>
+
+      <div id="ticketsList"><div class="empty"><div class="spinner"></div></div></div>
+
+      <!-- Ticket detail panel -->
+      <div id="ticketDetail" style="display:none;margin-top:20px"></div>
+    </div>
+
+    <!-- ── Tab 3: Escalated ───────────────────────────────────────────────── -->
+    <div id="tab-escalated" style="display:none">
+      <div class="section-title">Escalated to Engineer Team</div>
+      <div class="section-sub">These tickets have been raised to human support engineers</div>
+      <div id="escalatedList" style="margin-top:16px"><div class="empty"><div class="spinner"></div></div></div>
+    </div>
+
+  </div><!-- /main -->
+</div><!-- /app -->
+
+<!-- ── Voice Assistant Trigger ─────────────────────────────────────────────── -->
+<button class="voice-trigger" id="voiceTrigger" onclick="toggleVoice()" title="AI Support Assistant">💬</button>
+
+<!-- ── Voice Assistant Panel ──────────────────────────────────────────────── -->
+<div class="voice-panel" id="voicePanel">
+  <div class="voice-header">
+    <div>
+      <div class="voice-title">🤖 AI Support Assistant</div>
+      <div class="voice-subtitle" id="voiceTicketLabel">Select a ticket to get help</div>
+    </div>
+    <button onclick="toggleVoice()" style="background:none;border:none;color:var(--dim);cursor:pointer;font-size:18px">✕</button>
+  </div>
+
+  <div class="voice-messages" id="voiceMessages">
+    <div class="msg msg-bot">
+      Hi! I'm your AI support assistant. Select a ticket from "My Tickets" and I'll walk you through fixing it step by step. You can also type your question or use the mic 🎙️
+    </div>
+  </div>
+
+  <div class="voice-input-area">
+    <button class="mic-btn idle" id="micBtn" onclick="toggleMic()" title="Voice input">🎙️</button>
+    <textarea id="voiceInput" placeholder="Ask anything about your ticket..." rows="1"
+      onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendChat();}"></textarea>
+    <button class="btn btn-primary" onclick="sendChat()" style="padding:8px 14px;font-size:12px">Send</button>
+  </div>
+</div>
+
+<script>
+const API = 'http://localhost:8000';
+let allTickets   = [];
+let activeTicket = null;
+let chatHistory  = [];
+let recognition  = null;
+let isListening  = false;
+let voiceOpen    = false;
+let pollInterval = null;
+
+// ── Init ──────────────────────────────────────────────────────────────────────
+document.addEventListener('DOMContentLoaded', () => {
+  checkApi();
+  setupSpeechRecognition();
+  setInterval(checkApi, 15000);
+});
+
+async function checkApi() {
+  try {
+    const r = await fetch(API + '/health', { signal: AbortSignal.timeout(4000) });
+    const d = await r.json();
+    const ok = d.status === 'ok';
+    document.getElementById('apiDot').className = 'dot' + (ok ? ' live' : '');
+    document.getElementById('apiStatusText').textContent = ok ? 'API LIVE · Phase ' + d.phase : 'API OFFLINE';
+  } catch {
+    document.getElementById('apiDot').className = 'dot';
+    document.getElementById('apiStatusText').textContent = 'API OFFLINE';
+  }
+}
+
+// ── Tab switching ─────────────────────────────────────────────────────────────
+function switchTab(tab) {
+  ['submit','tickets','escalated'].forEach(t => {
+    document.getElementById('tab-' + t).style.display = t === tab ? 'block' : 'none';
+  });
+  document.querySelectorAll('.tab').forEach((el, i) => {
+    el.classList.toggle('active', ['submit','tickets','escalated'][i] === tab);
+  });
+  if (tab === 'tickets')   { loadMyTickets(); startPolling(); }
+  if (tab === 'escalated') { loadEscalated(); }
+  if (tab !== 'tickets')   { stopPolling(); }
+}
+
+function startPolling() {
+  stopPolling();
+  pollInterval = setInterval(loadMyTickets, 10000);
+}
+function stopPolling() {
+  if (pollInterval) { clearInterval(pollInterval); pollInterval = null; }
+}
+
+// ── Presets ───────────────────────────────────────────────────────────────────
+const PRESETS = {
+  vpn:   { desc: "VPN connection keeps dropping, unable to stay connected to company network for more than 5 minutes. Affects remote work completely.", sys: "VPN / Network", urgency: "2" },
+  email: { desc: "Unable to send or receive emails since this morning. Outlook shows 'disconnected from server' error. All email functionality is blocked.", sys: "Email / Outlook", urgency: "2" },
+  slow:  { desc: "Computer and all applications running extremely slowly for the past 2 hours. Simple tasks take minutes to complete. Productivity is severely impacted.", sys: "Workstation", urgency: "3" },
+  login: { desc: "Cannot login to the company portal. Password reset was done yesterday but still getting 'invalid credentials' error. Completely locked out.", sys: "Identity / SSO", urgency: "2" },
+  crash: { desc: "Main business application crashes every 10-15 minutes without warning. Error message shows 'unexpected exception'. Losing unsaved work each time.", sys: "Business Application", urgency: "1" },
+};
+
+function fillPreset(key) {
+  const p = PRESETS[key];
+  document.getElementById('issueDesc').value    = p.desc;
+  document.getElementById('systemAffected').value = p.sys;
+  document.getElementById('urgency').value      = p.urgency;
+}
+
+// ── Submit ticket ─────────────────────────────────────────────────────────────
+async function submitTicket() {
+  const desc    = document.getElementById('issueDesc').value.trim();
+  const name    = document.getElementById('userName').value.trim();
+  const contact = document.getElementById('userContact').value.trim();
+  const system  = document.getElementById('systemAffected').value.trim();
+  const urgency = document.getElementById('urgency').value;
+
+  if (!desc) { alert('Please describe your issue.'); return; }
+
+  const btn = document.getElementById('submitBtn');
+  btn.disabled = true;
+  btn.innerHTML = '<span class="spinner"></span> Submitting...';
+
+  try {
+    const fullDesc = system ? `[${system}] ${desc}` : desc;
+    const res = await fetch(API + '/tickets/ingest', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        description:    fullDesc,
+        urgency:        urgency,
+        impact:         urgency,
+        source:         'client_portal',
+        assigned_group: name || 'CLIENT-USER',
+      }),
+    });
+    const data = await res.json();
+
+    if (data.id) {
+      // Save ticket ID to localStorage so "My Tickets" can show it
+      const saved = JSON.parse(localStorage.getItem('myTickets') || '[]');
+      saved.unshift({ id: data.id, name, contact, submitted: new Date().toISOString() });
+      localStorage.setItem('myTickets', JSON.stringify(saved.slice(0, 50)));
+
+      const resultEl = document.getElementById('submitResult');
+      resultEl.style.display = 'block';
+      resultEl.innerHTML = `
+        <div style="padding:16px;background:rgba(0,230,118,.08);border:1px solid rgba(0,230,118,.25);border-radius:8px" class="fade-in">
+          <div style="font-size:14px;font-weight:800;color:var(--p3);margin-bottom:8px">✓ Ticket Submitted Successfully</div>
+          <div class="mono" style="font-size:11px;color:var(--dim);margin-bottom:10px">
+            ID: <span style="color:var(--accent)">${data.id}</span> &nbsp;·&nbsp;
+            Severity: <span style="color:var(--${data.severity==='P1'?'p1':data.severity==='P2'?'p2':'p3'})">${data.severity}</span> &nbsp;·&nbsp;
+            Category: ${data.category}
+          </div>
+          <div style="font-size:12px;color:var(--dim);margin-bottom:12px">
+            ${getSeverityMessage(data.severity)}
+          </div>
+          <button class="btn btn-ghost" onclick="viewTicket('${data.id}')" style="font-size:12px">
+            View Ticket Status →
+          </button>
+        </div>`;
+
+      // Clear form
+      document.getElementById('issueDesc').value = '';
+      document.getElementById('systemAffected').value = '';
+    }
+  } catch(e) {
+    alert('Failed to submit: ' + e.message + '\nMake sure the API server is running on port 8000.');
+  }
+
+  btn.disabled = false;
+  btn.innerHTML = '▶ SUBMIT TICKET';
+}
+
+function getSeverityMessage(sev) {
+  if (sev === 'P1') return '🔴 Critical issue detected — your ticket has been escalated to the engineering team immediately.';
+  if (sev === 'P2') return '🟡 High priority — an engineer will review this within 2-4 hours.';
+  return '🟢 Standard priority — your ticket is in the queue. Expected response within 1 business day.';
+}
+
+// ── Load my tickets ───────────────────────────────────────────────────────────
+async function loadMyTickets() {
+  const saved  = JSON.parse(localStorage.getItem('myTickets') || '[]');
+  const ids    = saved.map(s => s.id);
+  if (!ids.length) {
+    document.getElementById('ticketsList').innerHTML = `
+      <div class="empty">No tickets yet. Submit one from the "Raise Ticket" tab.</div>`;
+    return;
+  }
+
+  // Fetch each ticket from API
+  const fetched = await Promise.all(
+    ids.slice(0, 20).map(id =>
+      fetch(API + '/tickets/' + id).then(r => r.json()).catch(() => null)
+    )
+  );
+  allTickets = fetched.filter(Boolean);
+  renderTickets();
+
+  // Refresh active ticket detail if open
+  if (activeTicket) {
+    const updated = allTickets.find(t => t.id === activeTicket.id);
+    if (updated) openTicketDetail(updated);
+  }
+}
+
+function renderTickets() {
+  const search  = document.getElementById('ticketSearch')?.value?.toLowerCase() || '';
+  const statFil = document.getElementById('statusFilter')?.value || '';
+  const visible = allTickets.filter(t => {
+    const matchSrch = !search || t.id?.toLowerCase().includes(search) || t.description?.toLowerCase().includes(search);
+    const matchStat = !statFil || t.status === statFil;
+    return matchSrch && matchStat;
+  });
+
+  if (!visible.length) {
+    document.getElementById('ticketsList').innerHTML = '<div class="empty">No tickets match your filter.</div>';
+    return;
+  }
+
+  document.getElementById('ticketsList').innerHTML = visible.map(t => `
+    <div class="ticket-row sev-${t.severity}" onclick="openTicketDetail(${JSON.stringify(t).replace(/"/g,'&quot;')})"
+      ${activeTicket?.id===t.id ? 'class="ticket-row selected sev-'+t.severity+'"' : ''}>
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:6px">
+        <div style="display:flex;gap:6px;flex-wrap:wrap">
+          <span class="badge badge-${t.severity?.toLowerCase()}">${t.severity||'?'}</span>
+          <span class="badge badge-${getStatusClass(t.status)}">${(t.status||'?').replace('_',' ').toUpperCase()}</span>
+          <span class="badge" style="background:rgba(107,122,158,.12);color:var(--dim)">${t.category||'General'}</span>
+        </div>
+        <span class="mono" style="font-size:10px;color:var(--dim)">${t.opened_at?.slice(0,16)||''}</span>
+      </div>
+      <div style="font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">
+        ${t.description?.slice(0,90)||'No description'}
+      </div>
+      <div class="meta">${t.id} · Click to view details & solution</div>
+    </div>
+  `).join('');
+}
+
+function filterTickets() { renderTickets(); }
+
+function getStatusClass(s) {
+  if (s === 'resolved')        return 'resolved';
+  if (s === 'escalated')       return 'escalated';
+  if (s === 'pending_approval')return 'pending';
+  return 'open';
+}
+
+// ── Open ticket detail ────────────────────────────────────────────────────────
+async function openTicketDetail(ticket) {
+  if (typeof ticket === 'string') ticket = JSON.parse(ticket);
+  activeTicket = ticket;
+
+  // Set voice assistant context
+  document.getElementById('voiceTicketLabel').textContent = `Ticket: ${ticket.id}`;
+  chatHistory = [];
+
+  // Fetch RCA if available
+  let rca = null;
+  try {
+    const r = await fetch(API + `/tickets/${ticket.id}/rca/result`);
+    const d = await r.json();
+    if (d.status !== 'pending') rca = d;
+  } catch {}
+
+  const detailEl = document.getElementById('ticketDetail');
+  detailEl.style.display = 'block';
+
+  const statusTimeline = buildTimeline(ticket, rca);
+  const solutionHtml   = buildSolution(rca);
+
+  detailEl.innerHTML = `
+    <div class="card fade-in">
+      <!-- Ticket header -->
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:16px">
+        <div>
+          <div class="mono" style="font-size:10px;color:var(--accent);margin-bottom:4px">${ticket.id}</div>
+          <div style="font-size:15px;font-weight:700;line-height:1.4">${ticket.description||''}</div>
+        </div>
+        <div style="display:flex;gap:8px;flex-direction:column;align-items:flex-end">
+          <span class="badge badge-${ticket.severity?.toLowerCase()}">${ticket.severity}</span>
+          <span class="badge badge-${getStatusClass(ticket.status)}">${(ticket.status||'').replace('_',' ').toUpperCase()}</span>
+        </div>
+      </div>
+
+      <div class="divider"></div>
+
+      <!-- Status timeline -->
+      <div style="margin-bottom:16px">
+        <div class="label" style="margin-bottom:12px">TICKET PROGRESS</div>
+        ${statusTimeline}
+      </div>
+
+      <div class="divider"></div>
+
+      <!-- Solution -->
+      ${solutionHtml}
+
+      <!-- Action buttons -->
+      <div class="divider"></div>
+      <div class="flex-row">
+        ${ticket.status !== 'escalated' && ticket.status !== 'resolved' ? `
+          <button class="btn btn-warn" onclick="escalateTicket('${ticket.id}')" style="font-size:12px">
+            🚨 Request Engineer Support
+          </button>` : ''}
+        <button class="btn btn-ghost" onclick="openVoiceForTicket('${ticket.id}')" style="font-size:12px">
+          💬 Ask AI Assistant
+        </button>
+        ${ticket.status === 'escalated' ? `
+          <div style="padding:8px 14px;background:rgba(255,59,92,.1);border:1px solid rgba(255,59,92,.25);border-radius:6px;font-size:12px;color:var(--p1)">
+            ✓ Raised to engineer team — awaiting response
+          </div>` : ''}
+        ${ticket.status === 'resolved' ? `
+          <div style="padding:8px 14px;background:rgba(0,230,118,.1);border:1px solid rgba(0,230,118,.25);border-radius:6px;font-size:12px;color:var(--p3)">
+            ✓ Ticket resolved
+          </div>` : ''}
+      </div>
+    </div>`;
+}
+
+function buildTimeline(ticket, rca) {
+  const steps = [
+    { label: 'Ticket Submitted',   done: true,               icon: '📥', detail: `Received ${ticket.opened_at?.slice(0,16)||''}` },
+    { label: 'AI Classification',  done: !!ticket.severity,  icon: '🧠', detail: `${ticket.severity} · ${ticket.category}` },
+    { label: 'Root Cause Analysis',done: !!rca,              icon: '🔍', detail: rca ? 'Analysis complete' : 'In progress...' },
+    { label: 'Solution Generated', done: !!rca?.recommended_fix, icon: '💡', detail: rca?.recommended_fix?.slice(0,60)||'Pending' },
+    { label: ticket.status==='resolved' ? 'Resolved' : ticket.status==='escalated' ? 'Escalated to Engineer' : 'Awaiting Action',
+      done: ticket.status==='resolved'||ticket.status==='escalated',
+      icon: ticket.status==='resolved'?'✅':ticket.status==='escalated'?'🚨':'⏳',
+      detail: ticket.status==='resolved'? 'Issue resolved' : ticket.status==='escalated'? 'Engineer team notified' : 'Pending' },
+  ];
+
+  return `<div class="timeline">${steps.map((s,i) => `
+    <div class="timeline-item">
+      <div class="timeline-dot ${s.done?'done':i===steps.findIndex(x=>!x.done)?'active':'pending'}">
+        ${s.done ? '✓' : s.icon}
+      </div>
+      <div style="padding-top:4px">
+        <div style="font-size:13px;font-weight:600;color:${s.done?'var(--text)':'var(--dim)'}">${s.label}</div>
+        <div class="meta">${s.detail}</div>
+      </div>
+    </div>`).join('')}</div>`;
+}
+
+function buildSolution(rca) {
+  if (!rca || rca.status === 'pending') {
+    return `
+      <div style="padding:14px;background:var(--surface);border-radius:8px;text-align:center">
+        <div class="spinner" style="margin:0 auto 8px"></div>
+        <div style="font-size:12px;color:var(--dim)">AI is analysing your ticket and generating a solution...</div>
+      </div>`;
+  }
+
+  const steps = rca.fix_steps || [];
+  const stepsHtml = steps.length ? steps.map((step, i) => `
+    <div class="solution-step">
+      <div class="step-num">${i+1}</div>
+      <div style="font-size:13px;line-height:1.6;color:var(--text)">${step}</div>
+    </div>`).join('') : '';
+
+  const similarsHtml = (rca.similar_incidents||[]).length ? `
+    <div style="margin-top:14px">
+      <div class="label">SIMILAR PAST INCIDENTS USED AS REFERENCE</div>
+      ${rca.similar_incidents.map((s,i) => `
+        <div style="padding:8px 12px;background:var(--surface);border-radius:6px;margin-bottom:6px;border-left:3px solid var(--accent)">
+          <div style="font-size:11px;font-weight:600;color:var(--accent)">Match #${i+1} · ${s.similarity_pct?.toFixed?.(1)||'?'}% similar</div>
+          <div style="font-size:11px;color:var(--dim);margin-top:2px">${s.description?.slice(0,80)||'—'}</div>
+          ${s.resolution ? `<div style="font-size:11px;color:var(--p3);margin-top:2px">✓ ${s.resolution.slice(0,80)}</div>` : ''}
+        </div>`).join('')}
+    </div>` : '';
+
+  return `
+    <div>
+      <div class="label" style="margin-bottom:12px">AI-GENERATED SOLUTION</div>
+      <div class="solution-box">
+        <div style="font-size:14px;font-weight:700;color:var(--p3);margin-bottom:10px">
+          💡 ${rca.recommended_fix||'Investigation required'}
+        </div>
+        ${rca.root_cause ? `
+          <div style="font-size:12px;color:var(--dim);margin-bottom:12px;padding:10px;background:rgba(0,0,0,.2);border-radius:6px">
+            <strong style="color:var(--text)">Root cause:</strong> ${rca.root_cause}
+          </div>` : ''}
+        ${stepsHtml ? `<div style="margin-bottom:8px">${stepsHtml}</div>` : ''}
+        ${rca.estimated_resolution_hrs ? `
+          <div class="mono" style="font-size:10px;color:var(--dim);margin-top:10px;padding-top:10px;border-top:1px solid rgba(0,230,118,.1)">
+            Estimated resolution time: ${rca.estimated_resolution_hrs} hours
+          </div>` : ''}
+        ${rca.warnings ? `
+          <div style="margin-top:10px;padding:8px 12px;background:rgba(255,59,92,.1);border-radius:6px;font-size:11px;color:var(--p1)">
+            ⚠ ${rca.warnings}
+          </div>` : ''}
+      </div>
+      ${similarsHtml}
+    </div>`;
+}
+
+// ── Escalate ──────────────────────────────────────────────────────────────────
+async function escalateTicket(ticketId, reason = '') {
+  const saved    = JSON.parse(localStorage.getItem('myTickets') || '[]');
+  const myInfo   = saved.find(s => s.id === ticketId) || {};
+  const finalReason = reason || prompt('Briefly describe why you need engineer support:', 'The AI solution did not resolve my issue') || 'User requested engineer support';
+
+  if (!finalReason) return;
+
+  try {
+    const res = await fetch(API + `/tickets/${ticketId}/escalate`, {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        reason:    finalReason,
+        raised_by: myInfo.name || 'client_portal',
+        contact:   myInfo.contact || '',
+      }),
+    });
+    const data = await res.json();
+    if (data.outcome === 'escalated') {
+      alert(`✓ Ticket ${ticketId} has been raised to the support engineer team.\n\nExpected response: ${data.estimated_response}`);
+      await loadMyTickets();
+      const updated = allTickets.find(t => t.id === ticketId);
+      if (updated) openTicketDetail(updated);
+      switchTab('escalated');
+    }
+  } catch(e) {
+    alert('Escalation failed: ' + e.message);
+  }
+}
+
+async function viewTicket(id) {
+  switchTab('tickets');
+  await loadMyTickets();
+  const ticket = allTickets.find(t => t.id === id);
+  if (ticket) openTicketDetail(ticket);
+}
+
+// ── Load escalated tickets ────────────────────────────────────────────────────
+async function loadEscalated() {
+  try {
+    const res  = await fetch(API + '/tickets/escalated');
+    const data = await res.json();
+    const list = data.escalated || [];
+
+    if (!list.length) {
+      document.getElementById('escalatedList').innerHTML = `
+        <div class="empty">No escalated tickets right now.</div>`;
+      return;
+    }
+
+    document.getElementById('escalatedList').innerHTML = list.map(t => `
+      <div class="card fade-in" style="border-left:3px solid var(--p1);margin-bottom:12px">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start">
+          <div>
+            <div class="mono" style="font-size:10px;color:var(--accent);margin-bottom:4px">${t.id}</div>
+            <div style="font-size:13px;font-weight:600">${t.description?.slice(0,90)||''}</div>
+            <div class="meta">Escalated ${t.escalated_at?.slice(0,16)||''}</div>
+          </div>
+          <span class="badge badge-${t.severity?.toLowerCase()}">${t.severity}</span>
+        </div>
+        ${t.escalation_reason ? `
+          <div style="margin-top:10px;padding:8px 12px;background:rgba(255,59,92,.06);border-radius:6px;font-size:11px;color:var(--dim)">
+            Reason: ${t.escalation_reason?.replace('Reason: ','')||''}
+          </div>` : ''}
+        <div style="margin-top:12px;padding:10px 14px;background:rgba(255,176,32,.06);border:1px solid rgba(255,176,32,.2);border-radius:6px;font-size:12px;color:var(--p2)">
+          ⏳ Assigned to: SUPPORT-ENGINEER-TEAM · Awaiting response
+        </div>
+      </div>`).join('');
+  } catch(e) {
+    document.getElementById('escalatedList').innerHTML = `<div class="empty">Failed to load: ${e.message}</div>`;
+  }
+}
+
+// ── Voice / Chat Assistant ────────────────────────────────────────────────────
+function toggleVoice() {
+  voiceOpen = !voiceOpen;
+  const panel   = document.getElementById('voicePanel');
+  const trigger = document.getElementById('voiceTrigger');
+  panel.classList.toggle('open', voiceOpen);
+  trigger.textContent = voiceOpen ? '✕' : '💬';
+
+  if (voiceOpen && !activeTicket) {
+    addBotMsg("Please select a ticket from the 'My Tickets' tab first, and I'll help you resolve it step by step.");
+  }
+}
+
+function openVoiceForTicket(ticketId) {
+  const ticket = allTickets.find(t => t.id === ticketId);
+  if (ticket) {
+    activeTicket = ticket;
+    document.getElementById('voiceTicketLabel').textContent = `Ticket: ${ticketId}`;
+  }
+  voiceOpen = false;
+  toggleVoice();
+  setTimeout(() => {
+    addBotMsg(`I'm ready to help with ticket ${ticketId}. What would you like to know? I can walk you through the solution step by step, or answer any questions you have about this issue.`);
+    speakText(`I'm ready to help with ticket ${ticketId}. What would you like to know?`);
+  }, 300);
+}
+
+async function sendChat() {
+  const input = document.getElementById('voiceInput');
+  const msg   = input.value.trim();
+  if (!msg) return;
+
+  input.value = '';
+  addUserMsg(msg);
+
+  if (!activeTicket) {
+    addBotMsg("Please select a ticket from 'My Tickets' first so I can give you specific help.");
+    return;
+  }
+
+  // Show typing indicator
+  const typingId = 'typing-' + Date.now();
+  document.getElementById('voiceMessages').insertAdjacentHTML('beforeend',
+    `<div id="${typingId}" class="msg msg-bot" style="color:var(--dim)">Thinking...</div>`);
+  scrollMessages();
+
+  try {
+    const res  = await fetch(API + `/tickets/${activeTicket.id}/chat`, {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        message: msg,
+        history: chatHistory.slice(-4),
+      }),
+    });
+    const data = await res.json();
+    document.getElementById(typingId)?.remove();
+
+    const reply = data.reply || 'Sorry, something went wrong.';
+    addBotMsg(reply);
+    speakText(reply);
+
+    chatHistory.push({ role:'user', content: msg });
+    chatHistory.push({ role:'assistant', content: reply });
+
+    // Offer escalation if detected
+    if (data.escalate_requested) {
+      setTimeout(() => {
+        const escId = 'esc-offer-' + Date.now();
+        document.getElementById('voiceMessages').insertAdjacentHTML('beforeend', `
+          <div id="${escId}" class="msg msg-system">
+            You mentioned needing human help.
+            <br><br>
+            <button onclick="escalateFromChat('${activeTicket.id}','${escId}')"
+              style="padding:6px 14px;background:var(--p1);color:#fff;border:none;border-radius:4px;cursor:pointer;font-size:11px;font-family:inherit;font-weight:700;margin-top:6px">
+              🚨 Escalate to Engineer
+            </button>
+          </div>`);
+        scrollMessages();
+        speakText('It sounds like you need human support. Would you like me to escalate this to an engineer?');
+      }, 800);
+    }
+  } catch(e) {
+    document.getElementById(typingId)?.remove();
+    addBotMsg("Sorry, I couldn't connect to the AI. Make sure the API server is running.");
+  }
+}
+
+async function escalateFromChat(ticketId, elementId) {
+  document.getElementById(elementId)?.remove();
+  addBotMsg("Escalating your ticket to the support engineer team now...");
+  await escalateTicket(ticketId, 'User requested human engineer via AI assistant');
+  addBotMsg("✓ Your ticket has been escalated to the support engineer team. An engineer will contact you shortly. Is there anything else I can help you with in the meantime?");
+  speakText("Your ticket has been escalated to the support engineer team. An engineer will contact you shortly.");
+}
+
+function addBotMsg(text) {
+  document.getElementById('voiceMessages').insertAdjacentHTML('beforeend',
+    `<div class="msg msg-bot fade-in">${text}</div>`);
+  scrollMessages();
+}
+
+function addUserMsg(text) {
+  document.getElementById('voiceMessages').insertAdjacentHTML('beforeend',
+    `<div class="msg msg-user fade-in">${text}</div>`);
+  scrollMessages();
+}
+
+function scrollMessages() {
+  const el = document.getElementById('voiceMessages');
+  el.scrollTop = el.scrollHeight;
+}
+
+// ── Text-to-Speech (Web Speech API — completely free) ─────────────────────────
+function speakText(text) {
+  if (!window.speechSynthesis || !text) return;
+  window.speechSynthesis.cancel();
+  const utt  = new SpeechSynthesisUtterance(text.slice(0, 200));
+  utt.rate   = 1.05;
+  utt.pitch  = 1;
+  utt.volume = 0.9;
+
+  // Pick a good voice if available
+  const voices = window.speechSynthesis.getVoices();
+  const preferred = voices.find(v =>
+    v.name.includes('Google') || v.name.includes('Samantha') || v.name.includes('Alex')
+  );
+  if (preferred) utt.voice = preferred;
+  window.speechSynthesis.speak(utt);
+}
+
+// ── Speech Recognition (Web Speech API — completely free) ─────────────────────
+function setupSpeechRecognition() {
+  const SpeechRec = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SpeechRec) return;
+
+  recognition = new SpeechRec();
+  recognition.continuous    = false;
+  recognition.interimResults= false;
+  recognition.lang          = 'en-US';
+
+  recognition.onresult = (e) => {
+    const transcript = e.results[0][0].transcript;
+    document.getElementById('voiceInput').value = transcript;
+    sendChat();
+  };
+  recognition.onend = () => {
+    isListening = false;
+    const btn   = document.getElementById('micBtn');
+    btn.className   = 'mic-btn idle';
+    btn.textContent = '🎙️';
+  };
+  recognition.onerror = () => {
+    isListening = false;
+    document.getElementById('micBtn').className = 'mic-btn idle';
+    document.getElementById('micBtn').textContent = '🎙️';
+  };
+}
+
+function toggleMic() {
+  if (!recognition) {
+    alert('Voice input not supported in this browser. Try Chrome or Edge.');
+    return;
+  }
+  const btn = document.getElementById('micBtn');
+  if (isListening) {
+    recognition.stop();
+    isListening = false;
+    btn.className   = 'mic-btn idle';
+    btn.textContent = '🎙️';
+  } else {
+    recognition.start();
+    isListening = true;
+    btn.className   = 'mic-btn active';
+    btn.textContent = '⏹';
+    addBotMsg("Listening... speak your question.");
+  }
+}
+</script>
+</body>
+</html>
