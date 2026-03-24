@@ -457,13 +457,19 @@ Context:     {context}
 
 Based on the patterns in these past incidents, perform a thorough RCA.
 Provide a CONCRETE root cause and actionable fix. Be specific, not vague.
+CRITICAL INSTRUCTION: The past incidents only have brief resolutions. You MUST expand them into a detailed, multi-step sequence (at least 3-5 distinct steps) for the "fix_steps" array. Outline the exact troubleshooting, execution, and verification steps. DO NOT merely return a single string.
 
 Respond ONLY with valid JSON. No markdown. No explanation outside the JSON.
 
 {{
-  "root_cause": "Clear, specific explanation of the most likely root cause based on patterns in the similar incidents. Be concrete.",
-  "recommended_fix": "The single most important specific action to take right now. Be precise and actionable.",
-  "fix_steps": ["step 1 - specific action", "step 2 - specific action", "step 3 - specific action"],
+  "root_cause": "Clear, specific explanation of the root cause.",
+  "recommended_fix": "The single most important specific action to take.",
+  "fix_steps": [
+    "Step 1: Verify and isolate the issue...",
+    "Step 2: Pre-check or backup...",
+    "Step 3: Apply the primary fix...",
+    "Step 4: Verify recovery..."
+  ],
   "estimated_resolution_hrs": number,
   "pattern_match": "What common pattern across the past incidents led to this diagnosis",
   "source_citations": ["Past Incident #1: brief note", "Past Incident #2: brief note"],
@@ -537,7 +543,8 @@ def run_rca(ticket_id: str) -> dict:
                     "content": (
                         "You are an expert IT operations engineer performing root cause analysis. "
                         "Always respond with valid JSON only. No markdown. No extra text. "
-                        "Be specific and actionable in your analysis."
+                        "Be specific and actionable in your analysis. "
+                        "CRITICAL: The 'fix_steps' array MUST contain a detailed, multi-step (at least 3-5 steps) troubleshooting and resolution guide. Never output a single step."
                     )
                 },
                 {"role": "user", "content": prompt}
@@ -719,12 +726,13 @@ def _fallback_rca(ticket_id: str, rca_id: str, error: str) -> dict:
     """
     # Try to pull useful context from the ticket itself
     root_cause = "Automated RCA could not complete — likely infrastructure or configuration issue"
-    fix = "Check service logs and recent deployment changes"
+    fix = "Perform a systematic infrastructure triage to identify the failing component."
     fix_steps = [
-        "Review application and system logs for errors in the last 2 hours",
-        "Check if any recent deployments or config changes correlate with the incident",
-        "Verify service health across dependent systems (DB, cache, queues)",
-        "Escalate to on-call engineer if root cause not identified within 30 minutes",
+        "1. Verify Service Health: Check the status of the primary application pods/containers and dependent services (Database, Redis, Message Queues).",
+        "2. Inspect Application Logs: Review logs from the last 15-30 minutes for explicit errors, timeouts, or out-of-memory (OOM) kills.",
+        "3. Review Recent Changes: Check CI/CD pipelines and config management tools for any deployments or configuration changes that occurred right before the incident started.",
+        "4. Check Network & Infrastructure: Verify network connectivity, load balancer health, and available disk space/compute resources on the host nodes.",
+        "5. Escalate: If the root cause is not identified within 15 minutes of triage, escalate to the L3 infrastructure or respective domain engineering team."
     ]
     
     # If the error hints at what went wrong, give a better message
