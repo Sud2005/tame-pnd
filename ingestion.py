@@ -65,8 +65,8 @@ def write_audit(conn, event_type, ticket_id, **kwargs):
     conn.execute("""
         INSERT INTO audit_log
         (id, event_type, ticket_id, action_taken, timestamp,
-         operator_id, confidence, risk_tier, reasoning, outcome)
-        VALUES (?,?,?,?,?,?,?,?,?,?)
+         operator_id, confidence, risk_tier, reasoning, outcome, approval_path)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?)
     """, (
         str(uuid.uuid4()), event_type, ticket_id,
         kwargs.get("action_taken", ""),
@@ -76,6 +76,7 @@ def write_audit(conn, event_type, ticket_id, **kwargs):
         kwargs.get("risk_tier"),
         kwargs.get("reasoning", ""),
         kwargs.get("outcome", ""),
+        kwargs.get("approval_path"),
     ))
 
 
@@ -785,7 +786,7 @@ def execute_ticket(ticket_id: str, req: ExecuteRequest):
     write_audit(conn, "EXECUTE", ticket_id,
                 operator_id=req.operator_id, action_taken=f"EXECUTE:{req.fix_type}",
                 confidence=conf, risk_tier=risk, reasoning=req.operator_reason[:200],
-                outcome=outcome)
+                outcome=outcome, approval_path=req.approval_path)
     conn.commit()
 
     # 11. Add to FAISS
@@ -845,10 +846,13 @@ def rollback_execution(execution_id: str, req: ExecutionRollbackRequest):
     conn.execute("UPDATE tickets SET status='rolled_back', resolved_at=NULL, resolution_notes=? WHERE id=?",
                  (f"ROLLED BACK: {req.rollback_reason}", ticket_id))
 
-    # 7. Audit log
+    # 7. Audit log — also fetch approval_path from the original approval_actions row
+    apr_row = conn.execute("SELECT approval_path FROM approval_actions WHERE id=?", (exe.get("approval_id",""),)).fetchone()
+    approval_path = apr_row["approval_path"] if apr_row else None
     write_audit(conn, "ROLLBACK", ticket_id,
                 operator_id=req.operator_id, action_taken=f"ROLLBACK:{fix_type}",
-                reasoning=req.rollback_reason[:200], outcome="rolled_back")
+                reasoning=req.rollback_reason[:200], outcome="rolled_back",
+                approval_path=approval_path)
     conn.commit()
     conn.close()
 
@@ -896,7 +900,8 @@ def reject_ticket_v2(ticket_id: str, req: RejectRequestV2):
     write_audit(conn, "REJECT", ticket_id,
                 operator_id=req.operator_id, action_taken="Fix rejected",
                 confidence=conf, risk_tier=risk,
-                reasoning=req.reject_reason[:200], outcome="rejected")
+                reasoning=req.reject_reason[:200], outcome="rejected",
+                approval_path=req.approval_path)
     conn.commit()
     conn.close()
 
