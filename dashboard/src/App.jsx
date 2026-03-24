@@ -575,7 +575,17 @@ function ApprovalWorkflow({ ticket, rca, pred, onComplete }) {
   const [loading, setLoading] = useState(false);
   const [result, setResult]   = useState(null);
   const [countdown, setCountdown] = useState(null);
+  const [navCountdown, setNavCountdown] = useState(null);
   const countRef = useRef(null);
+  const navRef   = useRef(null);
+  const onCompleteFired = useRef(false);
+
+  function fireOnComplete(resultData) {
+    if (!onCompleteFired.current && onComplete) {
+      onCompleteFired.current = true;
+      onComplete(resultData);
+    }
+  }
 
   if (!ticket) return (
     <div style={{ height: "100%", display: "flex", alignItems: "center",
@@ -623,7 +633,11 @@ function ApprovalWorkflow({ ticket, rca, pred, onComplete }) {
             rca_id: rca?.id || null,
           }),
         });
-        outcome = res?.status || "rejected";
+        if (!res || res._error) {
+          outcome = "error";
+        } else {
+          outcome = (res.status === "rejected" || res.ticket_status === "rejected") ? "rejected" : "error";
+        }
 
       } else if (action === "rollback") {
         const res = await apiFetch(`/tickets/${ticket.id}/rollback`, {
@@ -633,7 +647,11 @@ function ApprovalWorkflow({ ticket, rca, pred, onComplete }) {
             rolled_back_by: "ops_dashboard",
           }),
         });
-        outcome = res?.outcome || "rolled_back";
+        if (!res || res._error) {
+          outcome = "error";
+        } else {
+          outcome = res.outcome || res.ticket_status || "rolled_back";
+        }
 
       } else {
         // approve / auto / senior_approve — call /execute endpoint
@@ -647,7 +665,11 @@ function ApprovalWorkflow({ ticket, rca, pred, onComplete }) {
             rca_id: rca?.id || null,
           }),
         });
-        outcome = apiResult?.outcome || "success";
+        if (!apiResult || apiResult._error) {
+          outcome = "error";
+        } else {
+          outcome = apiResult.outcome || "success";
+        }
       }
     } catch (err) {
       console.error("executeAction error:", err);
@@ -668,6 +690,7 @@ function ApprovalWorkflow({ ticket, rca, pred, onComplete }) {
     };
 
     setResult(resultData);
+    onCompleteFired.current = false; // reset guard for this new result
     setLoading(false);
   }
 
@@ -693,20 +716,43 @@ function ApprovalWorkflow({ ticket, rca, pred, onComplete }) {
 
   useEffect(() => () => clearInterval(countRef.current), []);
 
-  // ── Result screen ────────────────────────────────────────────────────────────
+  // ── Auto-navigate to audit trail after rejection or rollback ────────────────
+  useEffect(() => {
+    const outcome = result?.outcome;
+    if (!outcome || outcome === "cancelled" || outcome === "awaiting_rollback" || outcome === "error") return;
+    const delay = (outcome === "rejected" || outcome === "rolled_back") ? 3 : 5;
+    setNavCountdown(delay);
+    navRef.current = setInterval(() => {
+      setNavCountdown(prev => {
+        if (prev <= 1) {
+          clearInterval(navRef.current);
+          fireOnComplete(result);
+          if (typeof window.__setScreen === "function") window.__setScreen("audit");
+          return null;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+    return () => clearInterval(navRef.current);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [result?.outcome]);
+
+
   if (result) {
     const isSuccess   = result.outcome === "success";
     const isRejected  = result.outcome === "rejected";
     const isRolledBack= result.outcome === "rolled_back";
     const isCancelled = result.outcome === "cancelled";
+    const isError     = result.outcome === "error";
 
-    const icon  = isSuccess ? "✅" : isRejected ? "🚫" : isRolledBack ? "↩️" : isCancelled ? "⏹" : "❌";
+    const icon  = isSuccess ? "✅" : isRejected ? "🚫" : isRolledBack ? "↩️" : isCancelled ? "⏹" : isError ? "❌" : "❌";
     const label = isSuccess    ? "EXECUTED SUCCESSFULLY"
                 : isRejected   ? "FIX REJECTED — TICKET STAYS OPEN"
                 : isRolledBack ? "FIX ROLLED BACK — REVERTED"
                 : isCancelled  ? "ACTION CANCELLED"
+                : isError      ? "ACTION FAILED — API ERROR"
                 : "ACTION FAILED";
-    const color = isSuccess ? COLORS.p3 : isRejected ? COLORS.p1 : isRolledBack ? COLORS.p2 : COLORS.p2;
+    const color = isSuccess ? COLORS.p3 : isRejected ? COLORS.p1 : isRolledBack ? COLORS.p2 : isError ? COLORS.p1 : COLORS.p2;
 
     return (
       <div className="fade-in" style={{ height: "100%", display: "flex",
@@ -738,9 +784,16 @@ function ApprovalWorkflow({ ticket, rca, pred, onComplete }) {
             ⚠ Ticket remains open — escalate manually or trigger a new RCA
           </div>
         )}
+        {isError && (
+          <div style={{ padding: "10px 16px", background: COLORS.p1 + "15",
+            border: `1px solid ${COLORS.p1}33`, borderRadius: 8, fontSize: 12, color: COLORS.p1 }}>
+            ✗ API request failed. Ticket status has NOT changed. Please retry.
+          </div>
+        )}
         {isSuccess && (
           <button onClick={() => {
-            // Show rollback option
+            clearInterval(navRef.current);
+            setNavCountdown(null);
             setResult({ ...result, outcome: "awaiting_rollback" });
           }} style={{
             padding: "8px 20px", background: COLORS.p2 + "22", color: COLORS.p2,
@@ -758,13 +811,29 @@ function ApprovalWorkflow({ ticket, rca, pred, onComplete }) {
           </button>
         )}
 
+        {/* Auto-navigate countdown indicator */}
+        {navCountdown != null && !isCancelled && !isError && result.outcome !== "awaiting_rollback" && (
+          <div style={{ padding: "8px 16px", background: COLORS.accent + "15",
+            border: `1px solid ${COLORS.accent}33`, borderRadius: 8, fontSize: 12, color: COLORS.accent }}>
+            ↪ Moving to Audit Trail in {navCountdown}s…
+            <button onClick={() => { clearInterval(navRef.current); setNavCountdown(null); }} style={{
+              marginLeft: 10, padding: "2px 8px", background: "transparent",
+              border: `1px solid ${COLORS.accent}66`, borderRadius: 4, color: COLORS.accent,
+              fontSize: 11, cursor: "pointer", fontFamily: "inherit",
+            }}>Cancel</button>
+          </div>
+        )}
+
         <div style={{ display: "flex", gap: 10, marginTop: 8 }}>
-          <button onClick={() => setResult(null)} style={{
+          <button onClick={() => { clearInterval(navRef.current); setNavCountdown(null); setResult(null); }} style={{
             padding: "10px 20px", background: COLORS.border, color: COLORS.text,
             border: "none", borderRadius: 6, cursor: "pointer", fontFamily: "inherit",
             fontSize: 13, fontWeight: 600,
           }}>← Back to Workflow</button>
           <button onClick={() => {
+            clearInterval(navRef.current);
+            setNavCountdown(null);
+            fireOnComplete(result);
             if (typeof window.__setScreen === "function") window.__setScreen("audit");
           }} style={{
             padding: "10px 20px", background: COLORS.accent, color: COLORS.bg,
@@ -861,7 +930,7 @@ function ApprovalWorkflow({ ticket, rca, pred, onComplete }) {
         {rejectModal && (
           <RejectModal ticket={ticket} path={path} rca={rca}
             onClose={() => setRejectModal(false)}
-            onRejected={() => { setRejectModal(false); setResult({ action:"reject", outcome:"rejected", ticket_id:ticket.id, timestamp:new Date().toISOString() }); }}
+            onRejected={() => { setRejectModal(false); onCompleteFired.current = false; setResult({ action:"reject", outcome:"rejected", ticket_id:ticket.id, timestamp:new Date().toISOString() }); }}
           />)}
       </Card>
     </div>
@@ -1054,7 +1123,10 @@ function AuditTrail() {
                     {e.outcome && (
                       <Badge label={e.outcome}
                         color={e.outcome === "success" || e.outcome === "resolved" || e.outcome === "created"
-                          ? COLORS.p3 : e.outcome === "rollback" ? COLORS.p2 : COLORS.textDim} />
+                          ? COLORS.p3
+                          : e.outcome === "rolled_back" ? COLORS.p2
+                          : e.outcome === "rejected"    ? COLORS.p1
+                          : COLORS.textDim} />
                     )}
                   </td>
                 </tr>
@@ -1084,10 +1156,16 @@ function MemoryBrowser() {
   const [solutionTicket, setSolutionTicket] = useState(null);
   const PAGE = 100;
 
-  // Load overview stats once
+  // Load overview stats; refresh alongside ticket list
   useEffect(() => {
     apiFetch("/tickets/overview").then(d => { if (d) setOverview(d); });
   }, []);
+
+  // Refresh overview when ticket list is refreshed
+  function refreshAll() {
+    apiFetch("/tickets/overview").then(d => { if (d) setOverview(d); });
+    doSearch(0);
+  }
 
   // Search tickets when filters change
   const doSearch = useCallback(async (off = 0) => {
@@ -1139,11 +1217,18 @@ function MemoryBrowser() {
             Full dataset — {total.toLocaleString()} tickets · This is the AI's long-term memory
           </div>
         </div>
-        <button onClick={exportCSV} style={{
-          padding:"8px 16px", background:COLORS.accent, color:COLORS.bg,
-          border:"none", borderRadius:6, fontSize:12, fontWeight:700,
-          cursor:"pointer", fontFamily:"inherit",
-        }}>⬇ EXPORT CSV</button>
+        <div style={{ display:"flex", gap:8 }}>
+          <button onClick={refreshAll} style={{
+            padding:"8px 16px", background:COLORS.surface, color:COLORS.textDim,
+            border:`1px solid ${COLORS.border}`, borderRadius:6, fontSize:12, fontWeight:700,
+            cursor:"pointer", fontFamily:"inherit",
+          }}>↺ REFRESH</button>
+          <button onClick={exportCSV} style={{
+            padding:"8px 16px", background:COLORS.accent, color:COLORS.bg,
+            border:"none", borderRadius:6, fontSize:12, fontWeight:700,
+            cursor:"pointer", fontFamily:"inherit",
+          }}>⬇ EXPORT CSV</button>
+        </div>
       </div>
 
       {/* Overview stat cards */}
@@ -1565,8 +1650,11 @@ function RejectModal({ ticket, path, rca, onClose, onRejected }) {
       }),
     });
     setLoading(false);
-    if (res?.status === "rejected") onRejected();
-    else onClose();
+    if (res && !res._error && (res.status === "rejected" || res.ticket_status === "rejected")) {
+      onRejected();
+    } else {
+      onClose();
+    }
   }
 
   return (
@@ -2118,6 +2206,19 @@ export default function App() {
     setScreen("approval");
   }
 
+  function handleComplete(resultData) {
+    // Update selected ticket status to reflect backend changes
+    const statusMap = {
+      success:     "resolved",
+      rejected:    "rejected",
+      rolled_back: "rolled_back",
+    };
+    const newStatus = statusMap[resultData?.outcome];
+    if (newStatus) {
+      setSelected(prev => prev ? { ...prev, status: newStatus } : prev);
+    }
+  }
+
   const NAV = [
     { id: "feed",     label: "01  LIVE FEED",      icon: "⬡" },
     { id: "rca",      label: "02  RCA DETAIL",     icon: "⬡" },
@@ -2186,7 +2287,7 @@ export default function App() {
         )}
         {screen === "approval" && (
           <ApprovalWorkflow ticket={selected} rca={rcaData} pred={predData}
-            onComplete={null} />
+            onComplete={handleComplete} />
         )}
         {screen === "audit"    && <AuditTrail />}
         {screen === "memory"   && <MemoryBrowser />}
