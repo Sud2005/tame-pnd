@@ -16,13 +16,29 @@ import json
 import sqlite3
 import uuid
 from datetime import datetime
-from typing import Optional
+from typing import Optional, List
 
-from fastapi import FastAPI, HTTPException, BackgroundTasks
+from fastapi import FastAPI, HTTPException, BackgroundTasks, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 DB_PATH = "db/opsai.db"
+_MAX_REASON_LEN = 500   # max length for operator reason / rollback reason strings stored in DB
+
+# ── WebSocket connection registry ─────────────────────────────────────────────
+_ws_connections: set = set()
+
+
+async def _ws_broadcast(message: dict):
+    """Broadcast a JSON message to all connected WebSocket clients."""
+    dead = set()
+    for ws in _ws_connections:
+        try:
+            await ws.send_json(message)
+        except Exception:
+            dead.add(ws)
+    _ws_connections.difference_update(dead)
+
 
 try:
     from prediction import predict_ticket
@@ -226,6 +242,23 @@ def health():
     }
 
 
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    """
+    Real-time feed: clients connect here and receive JSON push-events
+    whenever a ticket is ingested, so the live-feed screen doesn't need polling.
+    Message format: {"type": "new_ticket", "id": "<ticket_id>"}
+    """
+    await websocket.accept()
+    _ws_connections.add(websocket)
+    try:
+        while True:
+            # Keep the connection alive; client may send any frame as a heartbeat
+            await websocket.receive_text()
+    except (WebSocketDisconnect, Exception):
+        _ws_connections.discard(websocket)
+
+
 @app.post("/tickets/ingest", response_model=TicketResponse)
 def ingest_ticket(ticket: TicketIngest, bg: BackgroundTasks):
     conn = get_db()
@@ -262,12 +295,68 @@ def ingest_ticket(ticket: TicketIngest, bg: BackgroundTasks):
                 ticket.urgency or "", ticket.impact or "", ticket.alert_status or "")
     if severity in ("P1", "P2"):
         bg.add_task(bg_rca, tid)
+    # Notify connected WebSocket clients about the new ticket
+    bg.add_task(_ws_broadcast, {"type": "new_ticket", "id": tid})
 
     return TicketResponse(
         id=tid, description=ticket.description, severity=severity, category=category,
         status="open", opened_at=now, anomaly_flags=kw["flags"],
         message=f"{tid} | {severity} | {category} | RCA {'auto-triggered' if severity in ('P1','P2') else 'on-demand'}",
     )
+
+
+class BulkIngestItem(TicketIngest):
+    """Inherits all fields from TicketIngest; only overrides the default source."""
+    source: Optional[str] = "bulk"
+
+
+@app.post("/tickets/bulk_ingest")
+def bulk_ingest(tickets: List[BulkIngestItem], bg: BackgroundTasks):
+    """
+    Ingest multiple tickets in a single request.
+    Each ticket gets its own prediction + RCA background tasks so they all fire.
+    Bug fix: previous version called ingest_ticket() without forwarding BackgroundTasks,
+    which silently dropped the prediction/RCA tasks.
+    """
+    results = []
+    conn = get_db()
+    now  = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        for ticket in tickets:
+            tid          = f"INC{uuid.uuid4().hex[:8].upper()}"
+            explicit_sev = normalize_severity(ticket.severity) if ticket.severity else None
+            kw           = run_keyword_analysis(ticket.description, explicit_sev)
+            severity     = explicit_sev or kw["suggested_severity"] or "P3"
+            if severity not in ("P1", "P2", "P3"):
+                severity = "P3"
+            category = ticket.category or detect_category(ticket.description, ticket.ci_cat or "")
+
+            conn.execute("""
+                INSERT INTO tickets (id, description, severity, category, opened_at, status, assigned_group)
+                VALUES (?,?,?,?,?,?,?)
+            """, (tid, ticket.description, severity, category, now, "open",
+                  ticket.assigned_group or "UNASSIGNED"))
+            write_audit(conn, "INGEST", tid,
+                        action_taken=f"via {ticket.source}",
+                        reasoning=f"bulk explicit={explicit_sev} flags={kw['flags']}",
+                        outcome="created")
+
+            # Register background tasks (all DB inserts complete before commit,
+            # background tasks run after the response is sent)
+            bg.add_task(bg_predict, tid, ticket.description, category,
+                        ticket.ci_cat or "", ticket.ci_subcat or "",
+                        ticket.urgency or "", ticket.impact or "", ticket.alert_status or "")
+            if severity in ("P1", "P2"):
+                bg.add_task(bg_rca, tid)
+            bg.add_task(_ws_broadcast, {"type": "new_ticket", "id": tid})
+
+            results.append({"id": tid, "severity": severity, "category": category})
+
+        conn.commit()
+    finally:
+        conn.close()
+
+    return {"ingested": len(results), "tickets": results}
 
 
 @app.post("/tickets/{ticket_id}/rca")
@@ -379,6 +468,284 @@ def rollback_ticket(ticket_id: str, body: RollbackRequest):
     """, (now, category))
     conn.commit(); conn.close()
     return {"message": f"Ticket {ticket_id} rolled back to open.", "outcome": "rolled_back"}
+
+
+# ── Approval workflow endpoints — write to approval_actions + executions ──────
+
+class ExecuteRequest(BaseModel):
+    fix_type:        Optional[str] = "restart_service"
+    operator_id:     Optional[str] = "ops_dashboard"
+    operator_reason: Optional[str] = ""
+    approval_path:   Optional[str] = "B"
+    action_type:     Optional[str] = "APPROVE"
+    rca_id:          Optional[str] = None
+    confidence:      Optional[int] = None
+    risk_tier:       Optional[str] = None
+
+
+class RejectV2Request(BaseModel):
+    operator_id:   Optional[str] = "ops_dashboard"
+    reject_reason: Optional[str] = "Fix recommendation rejected by operator"
+    approval_path: Optional[str] = "B"
+    rca_id:        Optional[str] = None
+
+
+def _map_fix_to_type(text: str) -> str:
+    """Normalise a free-text recommended_fix into a canonical fix_type string.
+    More-specific patterns are checked before less-specific ones."""
+    t = (text or "").lower()
+    if any(k in t for k in ("rollback", "revert")):             return "rollback_config"
+    if any(k in t for k in ("scale", "replica", "capacity")):   return "scale_up"
+    if any(k in t for k in ("cache", "clear", "purge", "flush")): return "clear_cache"
+    if any(k in t for k in ("restart", "reboot", "service")):   return "restart_service"
+    return "restart_service"
+
+
+@app.post("/tickets/{ticket_id}/execute")
+def execute_ticket(ticket_id: str, body: ExecuteRequest):
+    """
+    Approve and execute a fix recommendation.
+    Writes to approval_actions + executions tables (Bug 2 fix).
+    Resolves the ticket and updates fix_outcomes for trust calibration.
+    """
+    conn = get_db()
+    row  = conn.execute("SELECT * FROM tickets WHERE id=?", (ticket_id,)).fetchone()
+    if not row:
+        conn.close(); raise HTTPException(404, f"Ticket {ticket_id} not found")
+
+    ticket   = dict(row)
+    now      = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    fix_type = body.fix_type or _map_fix_to_type(body.operator_reason or "")
+    category = ticket.get("category", "General")
+
+    # Fetch confidence / risk from latest prediction if not provided
+    pred_row = conn.execute(
+        "SELECT confidence_score, risk_tier FROM predictions WHERE ticket_id=? ORDER BY created_at DESC LIMIT 1",
+        (ticket_id,)
+    ).fetchone()
+    confidence = body.confidence or (dict(pred_row)["confidence_score"] if pred_row else 70)
+    risk_tier  = body.risk_tier  or (dict(pred_row)["risk_tier"]        if pred_row else "Medium")
+
+    # Snapshot before/after state
+    pre_state  = json.dumps({"status": ticket.get("status"), "resolution_notes": ticket.get("resolution_notes")})
+    post_state = json.dumps({"status": "resolved", "fix_type": fix_type})
+
+    # Write approval_actions record
+    approval_id = str(uuid.uuid4())
+    conn.execute("""
+        INSERT INTO approval_actions
+        (id, ticket_id, rca_id, approval_path, action_type,
+         operator_id, operator_reason, recommended_fix,
+         confidence_at_time, risk_tier, created_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?)
+    """, (
+        approval_id, ticket_id, body.rca_id,
+        body.approval_path, body.action_type or "APPROVE",
+        body.operator_id, (body.operator_reason or "")[:_MAX_REASON_LEN],
+        fix_type, confidence, risk_tier, now,
+    ))
+
+    # Write executions record
+    execution_id = str(uuid.uuid4())
+    conn.execute("""
+        INSERT INTO executions
+        (id, approval_id, ticket_id, fix_type,
+         pre_state, post_state, outcome, rolled_back, executed_at)
+        VALUES (?,?,?,?,?,?,?,?,?)
+    """, (
+        execution_id, approval_id, ticket_id, fix_type,
+        pre_state, post_state, "success", 0, now,
+    ))
+
+    # Resolve the ticket
+    conn.execute("""
+        UPDATE tickets
+        SET status='resolved', resolved_at=?, resolution_notes=?, resolved_by=?
+        WHERE id=?
+    """, (now, body.operator_reason or fix_type, body.operator_id, ticket_id))
+
+    # Update fix_outcomes for trust calibration
+    conn.execute("""
+        UPDATE fix_outcomes
+        SET approve_count=approve_count+1, total_actions=total_actions+1, last_updated=?
+        WHERE category=?
+    """, (now, category))
+
+    write_audit(conn, "EXECUTE", ticket_id,
+                operator_id=body.operator_id,
+                confidence=confidence, risk_tier=risk_tier,
+                action_taken=f"Executed {fix_type} via Path {body.approval_path}",
+                reasoning=(body.operator_reason or "")[:200],
+                outcome="success")
+    conn.commit()
+
+    # Add to FAISS memory for future RCA
+    if RCA_ENABLED:
+        ticket["resolution_notes"] = body.operator_reason or fix_type
+        ticket["status"] = "resolved"
+        try: add_to_index(ticket)
+        except Exception as e: print(f"⚠️  FAISS add: {e}")
+
+    conn.close()
+    return {
+        "message":      f"Ticket {ticket_id} executed and resolved",
+        "execution_id": execution_id,
+        "approval_id":  approval_id,
+        "outcome":      "success",
+        "fix_type":     fix_type,
+    }
+
+
+@app.post("/tickets/{ticket_id}/reject_v2")
+def reject_ticket_v2(ticket_id: str, body: RejectV2Request):
+    """
+    Reject a fix recommendation with a full approval_actions audit trail (Bug 2 fix).
+    Ticket remains OPEN. No memory update.
+    """
+    conn = get_db()
+    row  = conn.execute("SELECT * FROM tickets WHERE id=?", (ticket_id,)).fetchone()
+    if not row:
+        conn.close(); raise HTTPException(404, f"Ticket {ticket_id} not found")
+
+    ticket   = dict(row)
+    now      = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    category = ticket.get("category", "General")
+
+    pred_row   = conn.execute(
+        "SELECT confidence_score, risk_tier FROM predictions WHERE ticket_id=? ORDER BY created_at DESC LIMIT 1",
+        (ticket_id,)
+    ).fetchone()
+    confidence = dict(pred_row)["confidence_score"] if pred_row else 50
+    risk_tier  = dict(pred_row)["risk_tier"]        if pred_row else "Medium"
+
+    # Write approval_actions record
+    approval_id = str(uuid.uuid4())
+    conn.execute("""
+        INSERT INTO approval_actions
+        (id, ticket_id, rca_id, approval_path, action_type,
+         operator_id, operator_reason, confidence_at_time, risk_tier, created_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?)
+    """, (
+        approval_id, ticket_id, body.rca_id,
+        body.approval_path, "REJECT",
+        body.operator_id, (body.reject_reason or "")[:_MAX_REASON_LEN],
+        confidence, risk_tier, now,
+    ))
+
+    # Keep ticket open / mark status as open
+    conn.execute("UPDATE tickets SET status='open' WHERE id=?", (ticket_id,))
+
+    # Update fix_outcomes reject count
+    conn.execute("""
+        UPDATE fix_outcomes
+        SET reject_count=reject_count+1, total_actions=total_actions+1, last_updated=?
+        WHERE category=?
+    """, (now, category))
+
+    write_audit(conn, "REJECT", ticket_id,
+                operator_id=body.operator_id,
+                confidence=confidence, risk_tier=risk_tier,
+                action_taken=f"Fix rejected via Path {body.approval_path}",
+                reasoning=(body.reject_reason or "")[:200],
+                outcome="rejected")
+    conn.commit(); conn.close()
+    return {
+        "message":      f"Fix rejected. Ticket {ticket_id} remains open.",
+        "approval_id":  approval_id,
+        "ticket_status": "open",
+        "status":       "rejected",
+        "outcome":      "rejected",
+    }
+
+
+@app.post("/tickets/{ticket_id}/cancel_auto")
+def cancel_auto(ticket_id: str, body: dict):
+    """
+    Cancel a Path A auto-execution countdown.
+    Writes a CANCEL event to the audit log so the action is traceable.
+    """
+    conn = get_db()
+    if not conn.execute("SELECT id FROM tickets WHERE id=?", (ticket_id,)).fetchone():
+        conn.close(); raise HTTPException(404, f"Ticket {ticket_id} not found")
+    write_audit(conn, "CANCEL", ticket_id,
+                operator_id=body.get("operator_id", "ops_dashboard"),
+                action_taken="Auto-execution cancelled by operator",
+                reasoning=f"rca_id={body.get('rca_id','?')}",
+                outcome="cancelled")
+    conn.commit(); conn.close()
+    return {"message": f"Auto-execution cancelled for {ticket_id}", "outcome": "cancelled"}
+
+
+@app.get("/tickets/{ticket_id}/executions")
+def get_ticket_executions(ticket_id: str):
+    """Returns all execution records for a ticket (Bug 2 fix)."""
+    conn  = get_db()
+    if not conn.execute("SELECT id FROM tickets WHERE id=?", (ticket_id,)).fetchone():
+        conn.close(); raise HTTPException(404, f"Ticket {ticket_id} not found")
+    rows = conn.execute("""
+        SELECT e.*, a.approval_path, a.action_type, a.operator_id as approver_id
+        FROM executions e
+        LEFT JOIN approval_actions a ON e.approval_id = a.id
+        WHERE e.ticket_id = ?
+        ORDER BY e.executed_at DESC
+    """, (ticket_id,)).fetchall()
+    conn.close()
+    return {"ticket_id": ticket_id, "executions": [dict(r) for r in rows]}
+
+
+@app.post("/executions/{execution_id}/rollback")
+def rollback_execution(execution_id: str, body: dict):
+    """
+    Roll back a specific execution record (Bug 2 fix).
+    Marks the execution as rolled_back, reverts ticket to open,
+    and penalises the fix_outcomes table.
+    """
+    conn = get_db()
+    exe  = conn.execute("SELECT * FROM executions WHERE id=?", (execution_id,)).fetchone()
+    if not exe:
+        conn.close(); raise HTTPException(404, f"Execution {execution_id} not found")
+
+    exe_dict    = dict(exe)
+    ticket_id   = exe_dict["ticket_id"]
+    ticket_row  = conn.execute("SELECT * FROM tickets WHERE id=?", (ticket_id,)).fetchone()
+    now         = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    reason      = body.get("rollback_reason", "Operator rollback")
+    operator_id = body.get("operator_id", "ops_dashboard")
+    category    = dict(ticket_row).get("category", "General") if ticket_row else "General"
+
+    # Mark execution as rolled_back
+    conn.execute("""
+        UPDATE executions
+        SET outcome='rolled_back', rolled_back=1, rollback_reason=?, rolled_back_at=?
+        WHERE id=?
+    """, (reason[:_MAX_REASON_LEN], now, execution_id))
+
+    # Revert ticket to open
+    if ticket_row:
+        conn.execute("""
+            UPDATE tickets
+            SET status='open', resolution_notes=NULL, resolved_at=NULL, resolved_by=NULL
+            WHERE id=?
+        """, (ticket_id,))
+
+    # Penalise fix_outcomes
+    conn.execute("""
+        UPDATE fix_outcomes
+        SET rollback_count=rollback_count+1, total_actions=total_actions+1, last_updated=?
+        WHERE category=?
+    """, (now, category))
+
+    write_audit(conn, "ROLLBACK", ticket_id,
+                operator_id=operator_id,
+                action_taken=f"Execution {execution_id[:12]} rolled back",
+                reasoning=reason[:200], outcome="rolled_back")
+    conn.commit(); conn.close()
+    return {
+        "message":      f"Execution {execution_id} rolled back",
+        "ticket_id":    ticket_id,
+        "status":       "rolled_back",
+        "outcome":      "rolled_back",
+    }
 
 
 @app.post("/tickets/{ticket_id}/escalate")
@@ -524,6 +891,7 @@ Keep replies under 120 words."""
 
 
 
+@app.get("/tickets/search")
 def search_tickets(
     q:        str  = "",
     severity: Optional[str] = None,
@@ -608,7 +976,9 @@ def tickets_overview():
     }
 
 
-
+@app.get("/tickets/{ticket_id}/prediction")
+def get_ticket_prediction(ticket_id: str):
+    """Returns the latest prediction for a ticket (includes approval_path)."""
     conn = get_db()
     row  = conn.execute("SELECT * FROM predictions WHERE ticket_id=? ORDER BY created_at DESC LIMIT 1",
                         (ticket_id,)).fetchone()

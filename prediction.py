@@ -444,14 +444,15 @@ def predict_ticket(
             INSERT INTO predictions
             (id, ticket_id, predicted_severity, predicted_category,
              predicted_incident, confidence_score, risk_tier,
-             anomaly_flagged, reasoning, raw_llm_response, created_at)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?)
+             anomaly_flagged, reasoning, raw_llm_response, approval_path, created_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
         """, (
             result["id"], result["ticket_id"],
             result["predicted_severity"], result["predicted_category"],
             result["predicted_incident_type"], result["confidence_score"],
             result["risk_tier"], int(result["anomaly_flagged"]),
             result["reasoning"], result.get("raw_llm_response",""),
+            result.get("approval_path", "B"),
             datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         ))
 

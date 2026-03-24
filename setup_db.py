@@ -49,6 +49,7 @@ CREATE TABLE IF NOT EXISTS predictions (
     anomaly_flagged     INTEGER DEFAULT 0,      -- 0/1
     reasoning           TEXT,
     raw_llm_response    TEXT,
+    approval_path       TEXT,                   -- A / B / C
     created_at          TEXT DEFAULT (datetime('now')),
     FOREIGN KEY (ticket_id) REFERENCES tickets(id)
 );
