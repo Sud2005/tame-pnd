@@ -1,7 +1,7 @@
 # TamePND — OpsAI Project Context
 # Human-Governed Autonomous AI Support System
 # Feed this entire file to Claude Opus / Antigravity before any bug fix or improvement request
-# Last updated: March 2026
+# Last updated: March 24, 2026
 
 ---
 
@@ -299,9 +299,13 @@ Fix: Use ingest form presets for demo (rich descriptions → varied confidence),
 5. Returns: root_cause, confidence, risk_tier, recommended_fix, fix_steps (list),
    estimated_resolution_hrs, pattern_match, source_citations, warnings
 6. DB write to `rca_results` + update ticket status to `pending_approval`
+7. **Detailed Infrastructure Fallback:** If the automated RCA fails (API error/timeout), the engine returns a systematic 5-step triage guide (Service Health, Logs, Recent Changes, Network, and Escalation) instead of a generic message.
 
 **Learning loop:** `add_to_index(ticket_dict)` — called by `/tickets/{id}/resolve`
 Adds newly resolved ticket to live FAISS index + persists to disk immediately
+
+**Enhanced RCA Prompt Enforcement:**
+The system now strictly enforces a **detailed, multi-step sequence (at least 3-5 distinct steps)** in the `fix_steps` array. This prevents the LLM from returning single-sentence repeats of the recommended fix, ensuring operational value even when historical data is sparse.
 
 **RCA prompt structure:**
 ```
@@ -456,6 +460,10 @@ dashboard/dist/
     - Operator Approval (Path B) now reachable with much lower confidence floors (40% for P3, 50% for P2).
 - Enabled `.env` hot-reloading using `load_dotenv(override=True)`.
 **Workaround:** Use IngestForm presets for the best demo visuals, but CSV tickets now distribute much better across paths.
+
+### BUG 1b — RCA "fix_steps" showing redundant/single steps [FIXED]
+**Root Cause:** Bias from sparse historical data caused the LLM to output single-sentence resolutions.
+**Fix:** Updated both the system and user prompts in `rca_engine.py` to explicitly demand a 3-5 step troubleshooting and verification sequence.
 
 ### BUG 2 — bulk_ingest endpoint calls ingest_ticket() without BackgroundTasks
 **Location:** ingestion.py `bulk_ingest()` function
