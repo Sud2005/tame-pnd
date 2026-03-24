@@ -198,8 +198,10 @@ function TicketFeed({ onSelectTicket, selected }) {
   const [tickets, setTickets]   = useState([]);
   const [stats, setStats]       = useState({});
   const [loading, setLoading]   = useState(true);
+  const [wsStatus, setWsStatus] = useState("connecting"); // connecting | live | polling
   const [filter, setFilter]     = useState("all");
   const prevIds = useRef(new Set());
+  const wsRef   = useRef(null);
 
   const load = useCallback(async () => {
     const sevParam = filter !== "all" ? `&severity=${filter}` : "";
@@ -220,11 +222,54 @@ function TicketFeed({ onSelectTicket, selected }) {
     setLoading(false);
   }, [filter]);
 
+  // WebSocket for real-time push, falling back to polling if unavailable
   useEffect(() => {
-    load();
-    const i = setInterval(load, 5000);
-    return () => clearInterval(i);
-  }, [load, filter]);
+    load(); // initial fetch
+
+    const wsUrl = API.replace(/^http/, "ws") + "/ws";
+    let ws;
+    let fallbackInterval = null;
+
+    function connectWs() {
+      try {
+        ws = new WebSocket(wsUrl);
+        wsRef.current = ws;
+
+        ws.onopen = () => {
+          setWsStatus("live");
+          if (fallbackInterval) { clearInterval(fallbackInterval); fallbackInterval = null; }
+        };
+
+        ws.onmessage = (evt) => {
+          try {
+            const msg = JSON.parse(evt.data);
+            if (msg.type === "new_ticket") load();
+          } catch { load(); }
+        };
+
+        ws.onerror = () => {
+          setWsStatus("polling");
+          // start polling fallback only once
+          if (!fallbackInterval) fallbackInterval = setInterval(load, 5000);
+        };
+
+        ws.onclose = () => {
+          setWsStatus("polling");
+          if (!fallbackInterval) fallbackInterval = setInterval(load, 5000);
+        };
+      } catch {
+        setWsStatus("polling");
+        if (!fallbackInterval) fallbackInterval = setInterval(load, 5000);
+      }
+    }
+
+    connectWs();
+
+    return () => {
+      if (wsRef.current) wsRef.current.close();
+      if (fallbackInterval) clearInterval(fallbackInterval);
+    };
+  }, [filter, load]);
 
   const visible = tickets; // filtering done server-side via API params
 
@@ -250,8 +295,13 @@ function TicketFeed({ onSelectTicket, selected }) {
       {/* Header + filters */}
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-          <LiveDot color={COLORS.p3} />
-          <span style={{ fontSize: 13, fontWeight: 600, color: COLORS.textDim }}>LIVE FEED</span>
+          <LiveDot color={wsStatus === "live" ? COLORS.p3 : COLORS.p2} />
+          <span style={{ fontSize: 13, fontWeight: 600, color: COLORS.textDim }}>
+            LIVE FEED
+          </span>
+          <span className="mono" style={{ fontSize: 9, color: COLORS.textDim, opacity: 0.7 }}>
+            {wsStatus === "live" ? "● WS" : wsStatus === "polling" ? "○ POLL" : "◌ …"}
+          </span>
         </div>
         <div style={{ display: "flex", gap: 6 }}>
           {["all","P1","P2","P3"].map(f => (
