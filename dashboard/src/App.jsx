@@ -708,10 +708,21 @@ function ApprovalWorkflow({ ticket, rca, pred, onComplete }) {
     }, 1000);
   }
 
-  function cancelAuto() {
+  async function cancelAuto() {
     clearInterval(countRef.current);
     setCountdown(null);
-    setResult({ action: "cancelled", outcome: "cancelled", timestamp: new Date().toISOString() });
+    // Write cancellation to audit trail so it does not appear as success
+    if (ticket?.id) {
+      try {
+        await apiFetch(`/tickets/${ticket.id}/cancel_auto`, {
+          method: "POST",
+          body: JSON.stringify({ operator_id: "ops_dashboard", rca_id: rca?.id || null }),
+        });
+      } catch (e) {
+        console.warn("cancelAuto audit write failed:", e);
+      }
+    }
+    setResult({ action: "cancelled", outcome: "cancelled", ticket_id: ticket?.id, timestamp: new Date().toISOString() });
   }
 
   useEffect(() => () => clearInterval(countRef.current), []);
@@ -846,18 +857,48 @@ function ApprovalWorkflow({ ticket, rca, pred, onComplete }) {
   }
 
   // ── Path A: Auto-execute ─────────────────────────────────────────────────────
-  if (path === "A") return (
+  if (path === "A") {
+    const hasFixSteps = rca?.fix_steps?.length > 0;
+    const recFixMarginBottom = hasFixSteps ? 16 : 24;
+    return (
     <div style={{ height: "100%", display: "flex", flexDirection: "column",
       alignItems: "center", justifyContent: "center", padding: 40, gap: 20 }}>
       <PathHeader path="A" risk={risk} conf={conf} riskColor={riskColor} />
-      <Card style={{ padding: 32, width: "100%", maxWidth: 520, textAlign: "center" }}>
+      <Card style={{ padding: 32, width: "100%", maxWidth: 560, textAlign: "center" }}>
         <div style={{ fontSize: 13, color: COLORS.textDim, marginBottom: 20 }}>
           Confidence is high enough for autonomous execution.<br />
           A 10-second cancel window is provided for human oversight.
         </div>
-        <div style={{ fontSize: 14, fontWeight: 600, color: COLORS.p3, marginBottom: 24 }}>
+
+        {/* Recommended fix — highlighted single-line summary */}
+        <div style={{ fontSize: 14, fontWeight: 600, color: COLORS.p3, marginBottom: recFixMarginBottom }}>
           {rca?.recommended_fix}
         </div>
+
+        {/* Detailed step-by-step fix instructions */}
+        {hasFixSteps && (
+          <div style={{ textAlign: "left", marginBottom: 24,
+            padding: "14px 16px", background: COLORS.surface,
+            border: `1px solid ${COLORS.border}`, borderRadius: 8 }}>
+            <div style={{ fontSize: 10, color: COLORS.textDim, letterSpacing: "0.1em",
+              fontWeight: 700, marginBottom: 10, textAlign: "left" }}>
+              STEP-BY-STEP FIX INSTRUCTIONS
+            </div>
+            {rca.fix_steps.map((step, i) => (
+              <div key={i} style={{ display: "flex", gap: 10, alignItems: "flex-start",
+                marginBottom: i < rca.fix_steps.length - 1 ? 8 : 0 }}>
+                <div style={{
+                  width: 20, height: 20, borderRadius: "50%", flexShrink: 0,
+                  background: COLORS.accent + "20", color: COLORS.accent,
+                  display: "flex", alignItems: "center", justifyContent: "center",
+                  fontSize: 10, fontWeight: 700,
+                }}>{i + 1}</div>
+                <div style={{ fontSize: 12, color: COLORS.textDim, lineHeight: 1.6 }}>{step}</div>
+              </div>
+            ))}
+          </div>
+        )}
+
         {countdown !== null ? (
           <div>
             <div style={{ fontSize: 64, fontWeight: 800, color: COLORS.accent,
@@ -886,7 +927,8 @@ function ApprovalWorkflow({ ticket, rca, pred, onComplete }) {
         )}
       </Card>
     </div>
-  );
+    );
+  }
 
   // ── Path B: Single approval ───────────────────────────────────────────────────
   if (path === "B") return (
@@ -1020,7 +1062,7 @@ function AuditTrail() {
     return () => clearInterval(i);
   }, []);
 
-  const EVENT_TYPES = ["ALL","INGEST","PREDICT","RCA","APPROVE","EXECUTE","ROLLBACK","REJECT","RESOLVE","AUTO_APPROVE","RERAISE"];
+  const EVENT_TYPES = ["ALL","INGEST","PREDICT","RCA","APPROVE","EXECUTE","ROLLBACK","REJECT","RESOLVE","AUTO_APPROVE","AUTO_CANCEL","RERAISE"];
   const visible = filter === "ALL" ? events : events.filter(e => e.event_type === filter);
 
   function exportCSV() {
@@ -1041,7 +1083,7 @@ function AuditTrail() {
     INGEST: COLORS.textDim, PREDICT: COLORS.accent, RCA: "#A78BFA",
     APPROVE: COLORS.p3, EXECUTE: COLORS.p3, REJECT: "#CC2244",
     ROLLBACK: "#FF6B35", RESOLVE: COLORS.p3, OVERRIDE: COLORS.p1,
-    AUTO_APPROVE: COLORS.accent, RERAISE: "#7B61FF",
+    AUTO_APPROVE: COLORS.accent, AUTO_CANCEL: COLORS.p2, RERAISE: "#7B61FF",
   };
 
   return (
@@ -1126,6 +1168,7 @@ function AuditTrail() {
                           ? COLORS.p3
                           : e.outcome === "rolled_back" ? COLORS.p2
                           : e.outcome === "rejected"    ? COLORS.p1
+                          : e.outcome === "cancelled"   ? COLORS.p2
                           : COLORS.textDim} />
                     )}
                   </td>

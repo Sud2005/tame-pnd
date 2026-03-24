@@ -140,6 +140,11 @@ class ReraiseRequest(BaseModel):
     assigned_engineer:  str = "L2_Support_Queue"
 
 
+class CancelAutoRequest(BaseModel):
+    operator_id: str = "ops_dashboard"
+    rca_id:      Optional[str] = None
+
+
 # ── Helper functions ─────────────────────────────────────────────────────────
 def gen_id(prefix=""):
     return f"{prefix}{uuid.uuid4().hex[:8].upper()}"
@@ -943,6 +948,37 @@ def reraise_ticket(ticket_id: str, req: ReraiseRequest):
         "assigned_to": req.assigned_engineer,
         "message": f"Ticket {ticket_id} escalated to {req.assigned_engineer}. Engineer will review within SLA.",
     }
+
+
+@app.post("/tickets/{ticket_id}/cancel_auto")
+def cancel_auto_execution(ticket_id: str, req: CancelAutoRequest):
+    """Log a Path A auto-execution cancellation to the audit trail.
+    Called when the operator clicks CANCEL during the 10-second countdown window."""
+    conn = get_db()
+    row = conn.execute("SELECT * FROM tickets WHERE id=?", (ticket_id,)).fetchone()
+    if not row:
+        conn.close()
+        raise HTTPException(404, f"Ticket {ticket_id} not found")
+
+    # Fetch confidence + risk for context
+    pred_row = conn.execute(
+        "SELECT * FROM predictions WHERE ticket_id=? ORDER BY created_at DESC LIMIT 1",
+        (ticket_id,)
+    ).fetchone()
+    conf = int(dict(pred_row).get("confidence_score", 50)) if pred_row else 50
+    risk = dict(pred_row).get("risk_tier", "Medium") if pred_row else "Medium"
+
+    write_audit(conn, "AUTO_CANCEL", ticket_id,
+                operator_id=req.operator_id,
+                action_taken="AUTO_EXECUTE:cancelled_by_operator",
+                confidence=conf, risk_tier=risk,
+                reasoning="Operator cancelled Path A auto-execution during 10-second window",
+                outcome="cancelled",
+                approval_path="A")
+    conn.commit()
+    conn.close()
+
+    return {"status": "cancelled", "ticket_id": ticket_id, "outcome": "cancelled"}
 
 
 @app.get("/tickets/{ticket_id}/executions")
