@@ -1195,7 +1195,7 @@ function AuditTrail() {
         <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
           <thead>
             <tr style={{ position: "sticky", top: 0, background: COLORS.surface }}>
-              {["TIMESTAMP","EVENT","TICKET","OPERATOR","PATH","CONFIDENCE","RISK","ACTION","OUTCOME"].map(h => (
+              {["TIMESTAMP","EVENT","TICKET","TICKET RAISER","PATH","CONFIDENCE","RISK","ACTION","OUTCOME"].map(h => (
                 <th key={h} className="mono" style={{
                   padding: "8px 10px", textAlign: "left", fontSize: 9,
                   color: COLORS.textDim, letterSpacing: "0.08em",

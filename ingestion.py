@@ -19,6 +19,7 @@ from datetime import datetime
 from typing import Optional, List
 
 from fastapi import FastAPI, HTTPException, BackgroundTasks, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -81,13 +82,14 @@ def write_audit(conn, event_type, ticket_id, **kwargs):
     conn.execute("""
         INSERT INTO audit_log
         (id, event_type, ticket_id, action_taken, timestamp,
-         operator_id, confidence, risk_tier, reasoning, outcome)
-        VALUES (?,?,?,?,?,?,?,?,?,?)
+         operator_id, approval_path, confidence, risk_tier, reasoning, outcome)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?)
     """, (
         str(uuid.uuid4()), event_type, ticket_id,
         kwargs.get("action_taken", ""),
         datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         kwargs.get("operator_id", "system"),
+        kwargs.get("approval_path"),
         kwargs.get("confidence"),
         kwargs.get("risk_tier"),
         kwargs.get("reasoning", ""),
@@ -240,6 +242,16 @@ def health():
         "prediction_engine": PREDICTION_ENABLED, "rca_engine": RCA_ENABLED,
         "timestamp": datetime.now().isoformat(),
     }
+
+
+@app.get("/portal")
+def serve_portal():
+    """Serve client_portal.html over HTTP so Web Speech API (microphone) works."""
+    import os
+    portal_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "client_portal.html")
+    if not os.path.exists(portal_path):
+        raise HTTPException(404, "client_portal.html not found")
+    return FileResponse(portal_path, media_type="text/html")
 
 
 @app.websocket("/ws")
@@ -573,6 +585,7 @@ def execute_ticket(ticket_id: str, body: ExecuteRequest):
 
     write_audit(conn, "EXECUTE", ticket_id,
                 operator_id=body.operator_id,
+                approval_path=body.approval_path,
                 confidence=confidence, risk_tier=risk_tier,
                 action_taken=f"Executed {fix_type} via Path {body.approval_path}",
                 reasoning=(body.operator_reason or "")[:200],
@@ -644,6 +657,7 @@ def reject_ticket_v2(ticket_id: str, body: RejectV2Request):
 
     write_audit(conn, "REJECT", ticket_id,
                 operator_id=body.operator_id,
+                approval_path=body.approval_path,
                 confidence=confidence, risk_tier=risk_tier,
                 action_taken=f"Fix rejected via Path {body.approval_path}",
                 reasoning=(body.reject_reason or "")[:200],
