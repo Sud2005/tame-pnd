@@ -32,10 +32,12 @@ const PATH_LABEL = { A: "AUTO-EXECUTE", B: "APPROVAL REQUIRED", C: "SENIOR REVIE
 const STATUS_COLOR = {
   open: COLORS.p2, pending_approval: COLORS.accent, resolved: COLORS.p3,
   rolled_back: "#FF6B35", rejected: "#CC2244", reraised: "#7B61FF",
+  escalated: COLORS.p1, user_cancelled: COLORS.textDim,
 };
 const STATUS_LABEL = {
   open: "OPEN", pending_approval: "PENDING", resolved: "RESOLVED",
   rolled_back: "ROLLED BACK", rejected: "REJECTED", reraised: "RE-RAISED",
+  escalated: "ESCALATED", user_cancelled: "CANCELLED BY USER",
 };
 
 // Map recommended_fix text to a simulation fix_type (mirrors backend _map_fix_to_type)
@@ -202,6 +204,10 @@ function TicketFeed({ onSelectTicket, selected }) {
   const [filter, setFilter]     = useState("all");
   const prevIds = useRef(new Set());
   const wsRef   = useRef(null);
+  // Keep a stable ref to the latest load function so the WS handler and
+  // polling interval always call the current version without needing to
+  // reconnect the socket every time the filter changes.
+  const loadRef = useRef(null);
 
   const load = useCallback(async () => {
     const sevParam = filter !== "all" ? `&severity=${filter}` : "";
@@ -222,17 +228,24 @@ function TicketFeed({ onSelectTicket, selected }) {
     setLoading(false);
   }, [filter]);
 
-  // WebSocket for real-time push, falling back to polling if unavailable
-  useEffect(() => {
-    load(); // initial fetch
+  // Keep loadRef in sync with the latest load function
+  useEffect(() => { loadRef.current = load; }, [load]);
 
+  // Re-fetch when filter changes (no WS reconnection needed)
+  useEffect(() => { load(); }, [load]);
+
+  // WebSocket for real-time push, falling back to polling if unavailable.
+  // This effect runs only ONCE (empty dependency array) so filter changes
+  // do not cause unnecessary WS reconnects.  Calls loadRef.current so it
+  // always uses the latest load function.
+  useEffect(() => {
     const wsUrl = API.replace(/^http/, "ws") + "/ws";
     let ws;
     let fallbackInterval = null;
     let reconnectTimeout = null;
 
     function startPolling() {
-      if (!fallbackInterval) fallbackInterval = setInterval(load, 3000);
+      if (!fallbackInterval) fallbackInterval = setInterval(() => loadRef.current?.(), 3000);
     }
 
     function connectWs() {
@@ -248,8 +261,8 @@ function TicketFeed({ onSelectTicket, selected }) {
         ws.onmessage = (evt) => {
           try {
             const msg = JSON.parse(evt.data);
-            if (msg.type === "new_ticket") load();
-          } catch { load(); }
+            if (msg.type === "new_ticket") loadRef.current?.();
+          } catch { loadRef.current?.(); }
         };
 
         ws.onerror = () => {
@@ -281,7 +294,7 @@ function TicketFeed({ onSelectTicket, selected }) {
       if (fallbackInterval) clearInterval(fallbackInterval);
       if (reconnectTimeout) clearTimeout(reconnectTimeout);
     };
-  }, [filter, load]);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const visible = tickets; // filtering done server-side via API params
 
@@ -1124,7 +1137,7 @@ function AuditTrail() {
     return () => clearInterval(i);
   }, []);
 
-  const EVENT_TYPES = ["ALL","INGEST","PREDICT","RCA","APPROVE","EXECUTE","ROLLBACK","REJECT","RESOLVE","AUTO_APPROVE","AUTO_CANCEL","RERAISE"];
+  const EVENT_TYPES = ["ALL","INGEST","PREDICT","RCA","APPROVE","EXECUTE","ROLLBACK","REJECT","RESOLVE","ESCALATE","USER_CANCEL","AUTO_APPROVE","AUTO_CANCEL","RERAISE","CANCEL"];
   const visible = filter === "ALL" ? events : events.filter(e => e.event_type === filter);
 
   function exportCSV() {
@@ -1145,7 +1158,9 @@ function AuditTrail() {
     INGEST: COLORS.textDim, PREDICT: COLORS.accent, RCA: "#A78BFA",
     APPROVE: COLORS.p3, EXECUTE: COLORS.p3, REJECT: "#CC2244",
     ROLLBACK: "#FF6B35", RESOLVE: COLORS.p3, OVERRIDE: COLORS.p1,
+    ESCALATE: COLORS.p1, USER_CANCEL: COLORS.textDim,
     AUTO_APPROVE: COLORS.accent, AUTO_CANCEL: COLORS.p2, RERAISE: "#7B61FF",
+    CANCEL: COLORS.p2,
   };
 
   return (
@@ -1574,9 +1589,12 @@ function SolutionModal({ ticket, onClose }) {
   const fixSteps = (rca?.fix_steps && Array.isArray(rca.fix_steps) && rca.fix_steps.length > 0)
     ? rca.fix_steps
     : (stepLines.length > 0 ? stepLines : []);
+  const similarIncidents = rca?.similar_incidents || [];
+  const sourceCitations  = rca?.source_citations || [];
 
   const statusColor = STATUS_COLOR[ticket.status] || COLORS.textDim;
   const statusLabel = STATUS_LABEL[ticket.status] || ticket.status?.replace("_"," ").toUpperCase() || "?";
+  const isFallback  = rca?.status === "fallback";
 
   return (
     <div onClick={e => { if (e.target === e.currentTarget) onClose(); }} style={{
@@ -1585,14 +1603,14 @@ function SolutionModal({ ticket, onClose }) {
       animation:"fade-in 0.2s ease",
     }}>
       <div onClick={e=>e.stopPropagation()} style={{
-        width:600, maxHeight:"85vh", background:COLORS.card,
+        width:640, maxHeight:"90vh", background:COLORS.card,
         border:`1px solid ${COLORS.border}`, borderRadius:12,
         padding:28, animation:"slide-in 0.25s ease", overflowY:"auto",
       }}>
         {/* Header */}
         <div style={{ display:"flex", justifyContent:"space-between", alignItems:"flex-start", marginBottom:16 }}>
           <div>
-            <div style={{ fontSize:16, fontWeight:800 }}>Detailed Solution</div>
+            <div style={{ fontSize:16, fontWeight:800 }}>AI Solution Details</div>
             <div className="mono" style={{ fontSize:10, color:COLORS.accent, marginTop:2 }}>
               {ticket.id}
             </div>
@@ -1609,6 +1627,7 @@ function SolutionModal({ ticket, onClose }) {
           <Badge label={ticket.category||"General"} color={COLORS.textDim} />
           <Badge label={statusLabel} color={statusColor} />
           {sections.fixType && <Badge label={sections.fixType.replace("_"," ")} color={COLORS.accent} />}
+          {isFallback && <Badge label="FALLBACK RCA" color={COLORS.p2} />}
         </div>
 
         {/* Description */}
@@ -1619,28 +1638,30 @@ function SolutionModal({ ticket, onClose }) {
 
         {loading && <div style={{ textAlign:"center", padding:20 }}><Spinner /></div>}
 
-        {/* Root Cause */}
-        {rootCause && (
-          <div style={{ marginBottom:14 }}>
-            <div className="mono" style={{ fontSize:9, color:COLORS.p1, letterSpacing:"0.1em", marginBottom:6, fontWeight:700 }}>
-              ROOT CAUSE
+        {/* Recommended Fix — hero section */}
+        {recFix && (
+          <div style={{ marginBottom:14, padding:"14px 16px",
+            background:`linear-gradient(135deg, ${COLORS.p3}12 0%, ${COLORS.p3}06 100%)`,
+            border:`1px solid ${COLORS.p3}44`, borderRadius:8 }}>
+            <div className="mono" style={{ fontSize:9, color:COLORS.p3, letterSpacing:"0.1em", marginBottom:6, fontWeight:700 }}>
+              💡 RECOMMENDED ACTION
             </div>
-            <div style={{ padding:"12px 14px", background:COLORS.p1+"10", border:`1px solid ${COLORS.p1}33`,
-              borderRadius:6, fontSize:13, color:COLORS.text, lineHeight:1.7 }}>
-              {rootCause}
+            <div style={{ fontSize:14, fontWeight:800, color:COLORS.p3, lineHeight:1.5 }}>
+              {recFix}
             </div>
           </div>
         )}
 
-        {/* Recommended Fix */}
-        {recFix && (
+        {/* Root Cause */}
+        {rootCause && (
           <div style={{ marginBottom:14 }}>
-            <div className="mono" style={{ fontSize:9, color:COLORS.p3, letterSpacing:"0.1em", marginBottom:6, fontWeight:700 }}>
-              RECOMMENDED FIX
+            <div className="mono" style={{ fontSize:9, color:COLORS.accent, letterSpacing:"0.1em", marginBottom:6, fontWeight:700 }}>
+              ROOT CAUSE
             </div>
-            <div style={{ padding:"12px 14px", background:COLORS.p3+"10", border:`1px solid ${COLORS.p3}33`,
-              borderRadius:6, fontSize:13, color:COLORS.text, lineHeight:1.7 }}>
-              {recFix}
+            <div style={{ padding:"12px 14px", background:`${COLORS.accent}10`,
+              border:`1px solid ${COLORS.accent}33`, borderLeft:`3px solid ${COLORS.accent}`,
+              borderRadius:"0 6px 6px 0", fontSize:13, color:COLORS.text, lineHeight:1.7 }}>
+              {rootCause}
             </div>
           </div>
         )}
@@ -1648,16 +1669,22 @@ function SolutionModal({ ticket, onClose }) {
         {/* Fix Steps */}
         {fixSteps.length > 0 && (
           <div style={{ marginBottom:14 }}>
-            <div className="mono" style={{ fontSize:9, color:COLORS.accent, letterSpacing:"0.1em", marginBottom:6, fontWeight:700 }}>
-              FIX STEPS
+            <div className="mono" style={{ fontSize:9, color:COLORS.accent, letterSpacing:"0.1em", marginBottom:8, fontWeight:700 }}>
+              STEP-BY-STEP RESOLUTION GUIDE
             </div>
             <div style={{ padding:"12px 14px", background:COLORS.accent+"08", border:`1px solid ${COLORS.accent}22`,
               borderRadius:6 }}>
               {fixSteps.map((step, i) => (
-                <div key={i} style={{ display:"flex", gap:10, marginBottom:i < fixSteps.length-1 ? 8 : 0,
-                  fontSize:12, color:COLORS.text, lineHeight:1.6 }}>
-                  <span className="mono" style={{ color:COLORS.accent, fontWeight:800, flexShrink:0 }}>{i+1}.</span>
-                  <span>{step}</span>
+                <div key={i} style={{ display:"flex", gap:12, marginBottom:i < fixSteps.length-1 ? 10 : 0,
+                  paddingBottom:i < fixSteps.length-1 ? 10 : 0,
+                  borderBottom:i < fixSteps.length-1 ? `1px solid ${COLORS.border}44` : "none" }}>
+                  <div style={{ minWidth:24, height:24, borderRadius:"50%",
+                    background:`${COLORS.accent}20`, color:COLORS.accent,
+                    display:"flex", alignItems:"center", justifyContent:"center",
+                    fontSize:10, fontWeight:800, fontFamily:"JetBrains Mono, monospace", flexShrink:0 }}>
+                    {i+1}
+                  </div>
+                  <div style={{ fontSize:12, color:COLORS.text, lineHeight:1.65 }}>{step}</div>
                 </div>
               ))}
             </div>
@@ -1668,12 +1695,54 @@ function SolutionModal({ ticket, onClose }) {
         {pattern && (
           <div style={{ marginBottom:14 }}>
             <div className="mono" style={{ fontSize:9, color:"#A78BFA", letterSpacing:"0.1em", marginBottom:6, fontWeight:700 }}>
-              PATTERN MATCH
+              PATTERN DETECTED
             </div>
             <div style={{ padding:"10px 14px", background:"#A78BFA10", border:"1px solid #A78BFA33",
               borderRadius:6, fontSize:12, color:COLORS.text, lineHeight:1.6 }}>
               {pattern}
             </div>
+          </div>
+        )}
+
+        {/* Similar Incidents */}
+        {similarIncidents.length > 0 && (
+          <div style={{ marginBottom:14 }}>
+            <div className="mono" style={{ fontSize:9, color:COLORS.textDim, letterSpacing:"0.1em", marginBottom:8, fontWeight:700 }}>
+              SIMILAR PAST INCIDENTS ({similarIncidents.length})
+            </div>
+            {similarIncidents.map((s, i) => (
+              <div key={i} style={{ padding:"8px 12px", background:COLORS.surface,
+                borderLeft:`3px solid ${COLORS.accent}`, borderRadius:"0 6px 6px 0",
+                marginBottom:6, fontSize:11 }}>
+                <div style={{ display:"flex", justifyContent:"space-between", marginBottom:3 }}>
+                  <span style={{ color:COLORS.accent, fontWeight:700 }}>Match #{i+1}</span>
+                  <span className="mono" style={{ color:COLORS.textDim }}>
+                    {s.similarity_pct?.toFixed?.(1)||"?"}% similar · {s.severity||""} · {s.category||""}
+                    {s.mttr_hrs ? ` · MTTR ${s.mttr_hrs}h` : ""}
+                  </span>
+                </div>
+                <div style={{ color:COLORS.textDim, marginBottom:s.resolution ? 3 : 0 }}>
+                  {(s.description||"—").slice(0,120)}
+                </div>
+                {s.resolution && (
+                  <div style={{ color:COLORS.p3 }}>✓ {s.resolution.slice(0,140)}</div>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* Source Citations */}
+        {sourceCitations.length > 0 && (
+          <div style={{ marginBottom:14, padding:"8px 12px",
+            background:`${COLORS.textDim}08`, border:`1px solid ${COLORS.border}`,
+            borderRadius:6 }}>
+            <div className="mono" style={{ fontSize:9, color:COLORS.textDim, letterSpacing:"0.1em", marginBottom:4, fontWeight:700 }}>
+              SOURCE CITATIONS
+            </div>
+            {sourceCitations.map((c, i) => (
+              <div key={i} style={{ fontSize:11, color:COLORS.textDim, padding:"1px 0" }}>• {c}</div>
+            ))}
           </div>
         )}
 
@@ -1717,21 +1786,30 @@ function SolutionModal({ ticket, onClose }) {
         )}
 
         {/* Meta */}
-        {ticket.resolution_time_hrs && (
-          <div className="mono" style={{ fontSize:10, color:COLORS.textDim, marginTop:6 }}>
-            Resolution time: {ticket.resolution_time_hrs}h
-          </div>
-        )}
-        {rca?.confidence_score != null && (
-          <div style={{ display:"flex", gap:12, marginTop:8 }}>
+        <div style={{ display:"flex", gap:16, flexWrap:"wrap", marginTop:8, paddingTop:10,
+          borderTop:`1px solid ${COLORS.border}` }}>
+          {ticket.resolution_time_hrs && (
+            <div className="mono" style={{ fontSize:10, color:COLORS.textDim }}>
+              Resolution time: {ticket.resolution_time_hrs}h
+            </div>
+          )}
+          {rca?.confidence_score != null && (
             <div className="mono" style={{ fontSize:10, color:COLORS.textDim }}>
               Confidence: {rca.confidence_score}%
             </div>
-            {rca.risk_tier && (
-              <Badge label={rca.risk_tier} color={RISK_COLOR[rca.risk_tier] || COLORS.textDim} />
-            )}
-          </div>
-        )}
+          )}
+          {rca?.estimated_resolution_hrs != null && (
+            <div className="mono" style={{ fontSize:10, color:COLORS.textDim }}>
+              Est. resolution: {rca.estimated_resolution_hrs}h
+            </div>
+          )}
+          {rca?.risk_tier && (
+            <Badge label={rca.risk_tier} color={RISK_COLOR[rca.risk_tier] || COLORS.textDim} />
+          )}
+          {rca?.approval_path && (
+            <Badge label={`Path ${rca.approval_path}`} color={COLORS.accent} />
+          )}
+        </div>
       </div>
     </div>
   );
