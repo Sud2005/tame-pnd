@@ -43,6 +43,8 @@ _faiss_index    = None
 _memory_store   = None   # list of dicts, parallel to FAISS index
 _embed_model    = None
 _index_ready    = False  # flag: True once index is fully loaded
+_groq_client    = None   # cached Groq client — created once, reused across requests
+_index_lock     = None   # threading lock for safe concurrent add_to_index calls
 
 
 # ── Embedding model ───────────────────────────────────────────────────────────
@@ -55,6 +57,55 @@ def get_embed_model():
         _embed_model = SentenceTransformer(EMBED_MODEL)
         print(f"   ✅ Model loaded: {EMBED_MODEL}")
     return _embed_model
+
+
+# ── Groq client (cached, created once) ───────────────────────────────────────
+
+def get_groq_client():
+    """Return a cached Groq client, creating one if needed.
+    Reusing the same client avoids re-authentication overhead and prevents
+    rate-limit false-positives caused by opening new HTTP connections for
+    every RCA request.
+    """
+    global _groq_client
+    if _groq_client is None:
+        api_key = os.getenv("GROQ_API_KEY")
+        if not api_key:
+            raise EnvironmentError("GROQ_API_KEY not set")
+        from groq import Groq
+        _groq_client = Groq(api_key=api_key)
+        print("✅ Groq client initialised")
+    return _groq_client
+
+
+def _groq_chat_with_retry(messages: list, max_tokens: int = 1500, max_retries: int = 3) -> str:
+    """Call Groq chat completions with exponential-backoff retry on transient errors.
+    Returns the raw response content string.
+    Raises the last exception if all retries are exhausted.
+    """
+    import time
+    client = get_groq_client()
+    last_err = None
+    for attempt in range(max_retries):
+        try:
+            response = client.chat.completions.create(
+                model=GROQ_MODEL,
+                messages=messages,
+                temperature=0.3,
+                max_tokens=max_tokens,
+            )
+            return response.choices[0].message.content
+        except Exception as e:
+            last_err = e
+            err_str = str(e).lower()
+            # Don't retry on auth / quota errors — they won't self-heal
+            if any(k in err_str for k in ("api_key", "invalid_api_key", "unauthorized", "quota")):
+                raise
+            # Exponential backoff: attempt 0 → 1 s, attempt 1 → 2 s, attempt 2 → 4 s
+            wait = 2 ** attempt
+            print(f"⚠️  Groq attempt {attempt + 1}/{max_retries} failed: {e}. Retrying in {wait}s…")
+            time.sleep(wait)
+    raise last_err
 
 
 def embed_text(text: str) -> np.ndarray:
@@ -224,22 +275,30 @@ def add_to_index(ticket: dict):
     """
     Adds a newly resolved ticket to the in-memory index.
     Also persists the updated store to disk.
+    Thread-safe: uses a module-level lock to prevent concurrent writes from
+    corrupting the index file when multiple tickets are resolved simultaneously.
     """
-    global _faiss_index, _memory_store
+    global _faiss_index, _memory_store, _index_lock
     import faiss
+    import threading
 
     if _faiss_index is None:
         return
 
+    # Initialise lock lazily so it is always associated with the correct interpreter
+    if _index_lock is None:
+        _index_lock = threading.Lock()
+
     text   = build_ticket_text(ticket)
     vector = embed_text(text).reshape(1, -1)
 
-    _faiss_index.add(vector)
-    _memory_store.append(ticket)
+    with _index_lock:
+        _faiss_index.add(vector)
+        _memory_store.append(ticket)
 
-    faiss.write_index(_faiss_index, INDEX_PATH)
-    with open(STORE_PATH, "wb") as f:
-        pickle.dump(_memory_store, f)
+        faiss.write_index(_faiss_index, INDEX_PATH)
+        with open(STORE_PATH, "wb") as f:
+            pickle.dump(_memory_store, f)
 
 
 # ── Semantic search ───────────────────────────────────────────────────────────
@@ -253,7 +312,11 @@ def search_similar(description: str, k: int = 5, exclude_ticket_id: str = None) 
     """
     index, store = get_index()
 
-    # Over-fetch to allow deduplication
+    if index.ntotal == 0:
+        return []
+
+    # Over-fetch to allow deduplication.
+    # When the index is very small, fetch everything available.
     fetch_k = min(k * 4, index.ntotal)
     query_vec = embed_text(description).reshape(1, -1)
     scores, indices = index.search(query_vec, k=fetch_k)
@@ -280,7 +343,15 @@ def search_similar(description: str, k: int = 5, exclude_ticket_id: str = None) 
         ticket["similarity_pct"]   = round(sim_score * 100, 1)
         candidates.append(ticket)
 
-    # Deduplicate: skip candidates whose description overlaps >80% with an already-selected result
+    # When the index is very small (e.g. fewer than 5 tickets) the
+    # >80% deduplication threshold can drop ALL candidates, leaving an
+    # empty list and causing RCA to always fall back.  Relax the threshold
+    # progressively so at least one match is always returned.
+    dedup_threshold = 0.80
+    if len(candidates) < k:
+        dedup_threshold = 0.95   # almost identical only
+
+    # Deduplicate: skip candidates whose description overlaps > threshold
     results = []
     selected_word_sets = []
     # Sort: prefer candidates with resolution notes first, then by similarity
@@ -296,7 +367,7 @@ def search_similar(description: str, k: int = 5, exclude_ticket_id: str = None) 
         # Check overlap with already-selected results
         too_similar = False
         for sw in selected_word_sets:
-            if _overlap(c_words, sw) > 0.80:
+            if _overlap(c_words, sw) > dedup_threshold:
                 too_similar = True
                 break
         if too_similar:
@@ -526,34 +597,21 @@ def run_rca(ticket_id: str) -> dict:
         if not similar:
             raise RuntimeError("No similar incidents found in index")
 
-        # ── Step 2: Groq synthesis ────────────────────────────────────────────
-        api_key = os.getenv("GROQ_API_KEY")
-        if not api_key:
-            raise EnvironmentError("GROQ_API_KEY not set")
-
-        from groq import Groq
-        client = Groq(api_key=api_key)
+        # ── Step 2: Groq synthesis (uses cached client + retry) ───────────────
         prompt = build_rca_prompt(ticket, similar)
-
-        response = client.chat.completions.create(
-            model=GROQ_MODEL,
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "You are an expert IT operations engineer performing root cause analysis. "
-                        "Always respond with valid JSON only. No markdown. No extra text. "
-                        "Be specific and actionable in your analysis. "
-                        "CRITICAL: The 'fix_steps' array MUST contain a detailed, multi-step (at least 3-5 steps) troubleshooting and resolution guide. Never output a single step."
-                    )
-                },
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0.3,
-            max_tokens=1500,
-        )
-
-        raw = response.choices[0].message.content
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "You are an expert IT operations engineer performing root cause analysis. "
+                    "Always respond with valid JSON only. No markdown. No extra text. "
+                    "Be specific and actionable in your analysis. "
+                    "CRITICAL: The 'fix_steps' array MUST contain a detailed, multi-step (at least 3-5 steps) troubleshooting and resolution guide. Never output a single step."
+                )
+            },
+            {"role": "user", "content": prompt}
+        ]
+        raw = _groq_chat_with_retry(messages, max_tokens=1500)
 
         # ── Step 3: Parse response ────────────────────────────────────────────
         parsed = _parse_rca_response(raw)

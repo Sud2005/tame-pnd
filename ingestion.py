@@ -676,6 +676,45 @@ def cancel_auto(ticket_id: str, body: dict):
     return {"message": f"Auto-execution cancelled for {ticket_id}", "outcome": "cancelled"}
 
 
+@app.post("/tickets/{ticket_id}/cancel_user")
+def cancel_ticket_user(ticket_id: str, body: dict):
+    """
+    User-initiated ticket cancellation from the client portal.
+    Sets status to 'user_cancelled' and writes a USER_CANCEL audit event.
+    Resolved or already-escalated tickets cannot be cancelled.
+    """
+    conn = get_db()
+    row = conn.execute("SELECT * FROM tickets WHERE id=?", (ticket_id,)).fetchone()
+    if not row:
+        conn.close(); raise HTTPException(404, f"Ticket {ticket_id} not found")
+
+    ticket = dict(row)
+    non_cancellable = {"resolved", "escalated", "user_cancelled"}
+    if ticket.get("status") in non_cancellable:
+        conn.close()
+        raise HTTPException(400, f"Ticket {ticket_id} cannot be cancelled — status is '{ticket.get('status')}'")
+
+    cancel_reason = (body.get("reason", "Cancelled by user") or "")[:200]
+    raised_by = body.get("raised_by", "client_portal")
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    conn.execute("UPDATE tickets SET status='user_cancelled' WHERE id=?", (ticket_id,))
+    write_audit(conn, "USER_CANCEL", ticket_id,
+                operator_id=raised_by,
+                action_taken="Ticket cancelled by user",
+                reasoning=cancel_reason,
+                outcome="user_cancelled")
+    conn.commit()
+    conn.close()
+
+    return {
+        "message":   f"Ticket {ticket_id} has been cancelled",
+        "ticket_id": ticket_id,
+        "outcome":   "user_cancelled",
+        "timestamp": now,
+    }
+
+
 @app.post("/tickets/{ticket_id}/reraise")
 def reraise_ticket(ticket_id: str, body: dict):
     """

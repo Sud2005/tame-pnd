@@ -135,6 +135,7 @@
   .badge-escalated  { background: rgba(255,59,92,.12);  color: var(--p1); border: 1px solid rgba(255,59,92,.25); }
   .badge-pending    { background: rgba(0,212,255,.12);  color: var(--accent); border: 1px solid rgba(0,212,255,.25); }
   .badge-rejected   { background: rgba(204,34,68,.12);  color: #CC2244; border: 1px solid rgba(204,34,68,.3); }
+  .badge-cancelled  { background: rgba(107,122,158,.12); color: var(--dim); border: 1px solid rgba(107,122,158,.25); }
 
   /* Ticket row */
   .ticket-row {
@@ -428,6 +429,7 @@
 
 <script>
 const API = 'http://localhost:8000';
+const CHAT_TIMEOUT_MS = 30000; // 30-second timeout for AI chat requests
 let allTickets   = [];
 let activeTicket = null;
 let chatHistory  = [];
@@ -583,10 +585,16 @@ async function loadMyTickets() {
   allTickets = fetched.filter(Boolean);
   renderTickets();
 
-  // Refresh active ticket detail if open
+  // Only re-open the active ticket detail when something meaningful has changed
+  // (status or resolution_notes), to prevent constant flickering during polling.
   if (activeTicket) {
     const updated = allTickets.find(t => t.id === activeTicket.id);
-    if (updated) openTicketDetail(updated);
+    if (updated && (
+      updated.status !== activeTicket.status ||
+      updated.resolution_notes !== activeTicket.resolution_notes
+    )) {
+      openTicketDetail(updated);
+    }
   }
 }
 
@@ -630,6 +638,7 @@ function getStatusClass(s) {
   if (s === 'escalated')       return 'escalated';
   if (s === 'pending_approval')return 'pending';
   if (s === 'rejected')        return 'rejected';
+  if (s === 'user_cancelled')  return 'cancelled';
   return 'open';
 }
 
@@ -686,13 +695,18 @@ async function openTicketDetail(ticket) {
       <!-- Action buttons -->
       <div class="divider"></div>
       <div class="flex-row">
-        ${ticket.status !== 'escalated' && ticket.status !== 'resolved' && ticket.status !== 'rejected' ? `
+        ${ticket.status !== 'escalated' && ticket.status !== 'resolved' && ticket.status !== 'rejected' && ticket.status !== 'user_cancelled' ? `
           <button class="btn btn-warn" onclick="escalateTicket('${ticket.id}')" style="font-size:12px">
             🚨 Request Engineer Support
           </button>` : ''}
-        <button class="btn btn-ghost" onclick="openVoiceForTicket('${ticket.id}')" style="font-size:12px">
-          💬 Ask AI Assistant
-        </button>
+        ${ticket.status !== 'resolved' && ticket.status !== 'user_cancelled' ? `
+          <button class="btn btn-ghost" onclick="openVoiceForTicket('${ticket.id}')" style="font-size:12px">
+            💬 Ask AI Assistant
+          </button>` : ''}
+        ${ticket.status !== 'resolved' && ticket.status !== 'escalated' && ticket.status !== 'user_cancelled' ? `
+          <button class="btn btn-ghost" onclick="cancelTicket('${ticket.id}')" style="font-size:12px;color:var(--danger);border-color:var(--danger)">
+            🗑 Cancel Ticket
+          </button>` : ''}
         ${ticket.status === 'escalated' ? `
           <div style="padding:8px 14px;background:rgba(255,59,92,.1);border:1px solid rgba(255,59,92,.25);border-radius:6px;font-size:12px;color:var(--p1)">
             ✓ Raised to engineer team — awaiting response
@@ -705,25 +719,32 @@ async function openTicketDetail(ticket) {
           <div style="padding:8px 14px;background:rgba(204,34,68,.1);border:1px solid rgba(204,34,68,.3);border-radius:6px;font-size:12px;color:#CC2244">
             ✕ Proposed fix was rejected by the support team — a new resolution is being sought
           </div>` : ''}
+        ${ticket.status === 'user_cancelled' ? `
+          <div style="padding:8px 14px;background:rgba(107,122,158,.1);border:1px solid rgba(107,122,158,.3);border-radius:6px;font-size:12px;color:var(--dim)">
+            ✕ You cancelled this ticket
+          </div>` : ''}
       </div>
     </div>`;
 }
 
 function buildTimeline(ticket, rca) {
+  const isCancelled = ticket.status === 'user_cancelled';
   const steps = [
     { label: 'Ticket Submitted',   done: true,               icon: '📥', detail: `Received ${ticket.opened_at?.slice(0,16)||''}` },
     { label: 'AI Classification',  done: !!ticket.severity,  icon: '🧠', detail: `${ticket.severity} · ${ticket.category}` },
-    { label: 'Root Cause Analysis',done: !!rca,              icon: '🔍', detail: rca ? 'Analysis complete' : 'In progress...' },
-    { label: 'Solution Generated', done: !!rca?.recommended_fix, icon: '💡', detail: rca?.recommended_fix?.slice(0,60)||'Pending' },
+    { label: 'Root Cause Analysis',done: !!rca || isCancelled, icon: '🔍', detail: isCancelled ? 'Cancelled' : rca ? 'Analysis complete' : 'In progress...' },
+    { label: 'Solution Generated', done: !!rca?.recommended_fix || isCancelled, icon: '💡', detail: isCancelled ? 'N/A — cancelled' : rca?.recommended_fix?.slice(0,60)||'Pending' },
     { label: ticket.status==='resolved' ? 'Resolved'
            : ticket.status==='escalated' ? 'Escalated to Engineer'
            : ticket.status==='rejected'  ? 'Fix Rejected'
+           : ticket.status==='user_cancelled' ? 'Cancelled by User'
            : 'Awaiting Action',
-      done: ticket.status==='resolved'||ticket.status==='escalated'||ticket.status==='rejected',
-      icon: ticket.status==='resolved'?'✅':ticket.status==='escalated'?'🚨':ticket.status==='rejected'?'🚫':'⏳',
+      done: ticket.status==='resolved'||ticket.status==='escalated'||ticket.status==='rejected'||isCancelled,
+      icon: ticket.status==='resolved'?'✅':ticket.status==='escalated'?'🚨':ticket.status==='rejected'?'🚫':isCancelled?'🗑':'⏳',
       detail: ticket.status==='resolved'? 'Issue resolved'
             : ticket.status==='escalated'? 'Engineer team notified'
             : ticket.status==='rejected'? 'Fix not approved — awaiting new resolution'
+            : isCancelled? 'Ticket closed by you'
             : 'Pending' },
   ];
 
@@ -742,51 +763,82 @@ function buildTimeline(ticket, rca) {
 function buildSolution(rca) {
   if (!rca || rca.status === 'pending') {
     return `
-      <div style="padding:14px;background:var(--surface);border-radius:8px;text-align:center">
-        <div class="spinner" style="margin:0 auto 8px"></div>
-        <div style="font-size:12px;color:var(--dim)">AI is analysing your ticket and generating a solution...</div>
+      <div style="padding:16px;background:var(--surface);border:1px solid var(--border);border-radius:8px;text-align:center">
+        <div class="spinner" style="margin:0 auto 10px"></div>
+        <div style="font-size:13px;font-weight:700;color:var(--text);margin-bottom:4px">Generating AI Solution…</div>
+        <div style="font-size:11px;color:var(--dim)">Searching 46,000+ resolved incidents for patterns matching your issue</div>
       </div>`;
   }
 
   const steps = rca.fix_steps || [];
-  const stepsHtml = steps.length ? steps.map((step, i) => `
-    <div class="solution-step">
-      <div class="step-num">${i+1}</div>
-      <div style="font-size:13px;line-height:1.6;color:var(--text)">${step}</div>
-    </div>`).join('') : '';
-
-  const similarsHtml = (rca.similar_incidents||[]).length ? `
-    <div style="margin-top:14px">
-      <div class="label">SIMILAR PAST INCIDENTS USED AS REFERENCE</div>
-      ${rca.similar_incidents.map((s,i) => `
-        <div style="padding:8px 12px;background:var(--surface);border-radius:6px;margin-bottom:6px;border-left:3px solid var(--accent)">
-          <div style="font-size:11px;font-weight:600;color:var(--accent)">Match #${i+1} · ${s.similarity_pct?.toFixed?.(1)||'?'}% similar</div>
-          <div style="font-size:11px;color:var(--dim);margin-top:2px">${s.description?.slice(0,80)||'—'}</div>
-          ${s.resolution ? `<div style="font-size:11px;color:var(--p3);margin-top:2px">✓ ${s.resolution.slice(0,80)}</div>` : ''}
+  const stepsHtml = steps.length ? `
+    <div style="margin:12px 0 4px">
+      <div class="label" style="margin-bottom:8px;color:var(--p3)">STEP-BY-STEP RESOLUTION GUIDE</div>
+      ${steps.map((step, i) => `
+        <div class="solution-step">
+          <div class="step-num">${i+1}</div>
+          <div style="font-size:13px;line-height:1.65;color:var(--text)">${step}</div>
         </div>`).join('')}
     </div>` : '';
 
+  const sourceCitations = (rca.source_citations||[]).length ? `
+    <div style="margin-top:10px;padding:8px 12px;background:rgba(107,122,158,.06);border:1px solid rgba(107,122,158,.15);border-radius:6px">
+      <div class="label" style="margin-bottom:4px">SOURCE CITATIONS</div>
+      ${rca.source_citations.map(c => `<div style="font-size:11px;color:var(--dim);padding:1px 0">• ${c}</div>`).join('')}
+    </div>` : '';
+
+  const similarsHtml = (rca.similar_incidents||[]).length ? `
+    <div style="margin-top:14px">
+      <div class="label" style="margin-bottom:8px">SIMILAR PAST INCIDENTS USED AS REFERENCE</div>
+      ${rca.similar_incidents.map((s,i) => `
+        <div style="padding:8px 12px;background:var(--surface);border-radius:6px;margin-bottom:6px;border-left:3px solid var(--accent)">
+          <div style="font-size:11px;font-weight:600;color:var(--accent)">Match #${i+1} · ${s.similarity_pct?.toFixed?.(1)||'?'}% similar · ${s.severity||''} · ${s.category||''}</div>
+          <div style="font-size:11px;color:var(--dim);margin-top:2px">${s.description?.slice(0,100)||'—'}</div>
+          ${s.resolution ? `<div style="font-size:11px;color:var(--p3);margin-top:2px">✓ ${s.resolution.slice(0,120)}</div>` : ''}
+          ${s.mttr_hrs ? `<div style="font-size:10px;color:var(--dim);margin-top:1px;font-family:monospace">MTTR: ${s.mttr_hrs}h</div>` : ''}
+        </div>`).join('')}
+    </div>` : '';
+
+  const isFallback = rca.status === 'fallback';
+
   return `
     <div>
-      <div class="label" style="margin-bottom:12px">AI-GENERATED SOLUTION</div>
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
+        <div class="label">AI-GENERATED SOLUTION</div>
+        ${isFallback ? `<span class="badge" style="background:rgba(255,176,32,.12);color:var(--p2);border:1px solid rgba(255,176,32,.25);font-size:9px">FALLBACK — retry RCA for full analysis</span>` : `<span class="badge" style="background:rgba(0,230,118,.12);color:var(--p3);border:1px solid rgba(0,230,118,.25);font-size:9px">AI-POWERED</span>`}
+      </div>
       <div class="solution-box">
-        <div style="font-size:14px;font-weight:700;color:var(--p3);margin-bottom:10px">
-          💡 ${rca.recommended_fix||'Investigation required'}
+        <!-- Recommended fix — headline -->
+        <div style="display:flex;align-items:flex-start;gap:10px;margin-bottom:12px;padding-bottom:12px;border-bottom:1px solid rgba(0,230,118,.15)">
+          <div style="font-size:22px;flex-shrink:0">💡</div>
+          <div>
+            <div style="font-size:10px;font-family:monospace;letter-spacing:.08em;color:var(--p3);margin-bottom:4px">RECOMMENDED ACTION</div>
+            <div style="font-size:15px;font-weight:800;color:var(--p3);line-height:1.4">${rca.recommended_fix||'Investigation required'}</div>
+          </div>
         </div>
         ${rca.root_cause ? `
-          <div style="font-size:12px;color:var(--dim);margin-bottom:12px;padding:10px;background:rgba(0,0,0,.2);border-radius:6px">
-            <strong style="color:var(--text)">Root cause:</strong> ${rca.root_cause}
+          <div style="margin-bottom:12px;padding:10px 14px;background:rgba(0,0,0,.25);border-left:3px solid var(--accent);border-radius:0 6px 6px 0">
+            <div style="font-size:10px;font-family:monospace;letter-spacing:.08em;color:var(--accent);margin-bottom:4px">ROOT CAUSE</div>
+            <div style="font-size:12px;color:var(--text);line-height:1.6">${rca.root_cause}</div>
           </div>` : ''}
-        ${stepsHtml ? `<div style="margin-bottom:8px">${stepsHtml}</div>` : ''}
+        ${rca.pattern_match ? `
+          <div style="margin-bottom:12px;padding:8px 12px;background:rgba(167,139,250,.06);border:1px solid rgba(167,139,250,.2);border-radius:6px">
+            <div style="font-size:10px;font-family:monospace;letter-spacing:.08em;color:#A78BFA;margin-bottom:3px">PATTERN DETECTED</div>
+            <div style="font-size:11px;color:var(--text)">${rca.pattern_match}</div>
+          </div>` : ''}
+        ${stepsHtml}
+        ${rca.warnings ? `
+          <div style="margin-top:10px;padding:10px 14px;background:rgba(255,59,92,.08);border:1px solid rgba(255,59,92,.25);border-radius:6px">
+            <div style="font-size:10px;font-family:monospace;letter-spacing:.08em;color:var(--p1);margin-bottom:3px">⚠ WARNINGS</div>
+            <div style="font-size:12px;color:var(--text)">${rca.warnings}</div>
+          </div>` : ''}
         ${rca.estimated_resolution_hrs ? `
           <div class="mono" style="font-size:10px;color:var(--dim);margin-top:10px;padding-top:10px;border-top:1px solid rgba(0,230,118,.1)">
-            Estimated resolution time: ${rca.estimated_resolution_hrs} hours
-          </div>` : ''}
-        ${rca.warnings ? `
-          <div style="margin-top:10px;padding:8px 12px;background:rgba(255,59,92,.1);border-radius:6px;font-size:11px;color:var(--p1)">
-            ⚠ ${rca.warnings}
+            Estimated resolution: ${rca.estimated_resolution_hrs} hour${rca.estimated_resolution_hrs != 1 ? 's' : ''}
+            ${rca.approval_path ? ` · Approval path: ${rca.approval_path}` : ''}
           </div>` : ''}
       </div>
+      ${sourceCitations}
       ${similarsHtml}
     </div>`;
 }
@@ -829,37 +881,98 @@ async function viewTicket(id) {
   if (ticket) openTicketDetail(ticket);
 }
 
+// ── Cancel ticket (user-initiated) ───────────────────────────────────────────
+async function cancelTicket(ticketId) {
+  const reason = prompt('Why are you cancelling this ticket? (optional)', 'Issue resolved on my own');
+  if (reason === null) return; // user clicked Cancel in prompt
+
+  try {
+    const saved  = JSON.parse(localStorage.getItem('myTickets') || '[]');
+    const myInfo = saved.find(s => s.id === ticketId) || {};
+    const res = await fetch(API + `/tickets/${ticketId}/cancel_user`, {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        reason:    reason || 'Cancelled by user',
+        raised_by: myInfo.name || 'client_portal',
+      }),
+    });
+    const data = await res.json();
+    if (res.ok && data.outcome === 'user_cancelled') {
+      await loadMyTickets();
+      const updated = allTickets.find(t => t.id === ticketId);
+      if (updated) openTicketDetail(updated);
+    } else {
+      alert(`Could not cancel ticket: ${data.detail || data.message || 'Unknown error'}`);
+    }
+  } catch(e) {
+    alert('Cancellation failed: ' + e.message);
+  }
+}
+
 // ── Load escalated tickets ────────────────────────────────────────────────────
 async function loadEscalated() {
+  const listEl = document.getElementById('escalatedList');
+  listEl.innerHTML = '<div class="empty"><span class="spinner"></span> Loading...</div>';
   try {
     const res  = await fetch(API + '/tickets/escalated');
     const data = await res.json();
     const list = data.escalated || [];
 
     if (!list.length) {
-      document.getElementById('escalatedList').innerHTML = `
-        <div class="empty">No escalated tickets right now.</div>`;
+      listEl.innerHTML = '<div class="empty">No escalated tickets right now.</div>';
       return;
     }
 
-    document.getElementById('escalatedList').innerHTML = list.map(t => `
+    // Fetch audit trail events for each escalated ticket to surface the
+    // escalation reasoning and elapsed time prominently.
+    const withAudit = await Promise.all(list.map(async t => {
+      try {
+        const ar = await fetch(API + `/tickets/${t.id}/audit`);
+        const ad = await ar.json();
+        const escEvent = (ad.events || []).find(e => e.event_type === 'ESCALATE');
+        return { ...t, _auditReason: escEvent?.reasoning || t.escalation_reason || '', _auditTs: escEvent?.timestamp || t.escalated_at };
+      } catch { return { ...t, _auditReason: t.escalation_reason || '', _auditTs: t.escalated_at }; }
+    }));
+
+    const now = Date.now();
+    listEl.innerHTML = withAudit.map(t => {
+      const elapsedMin = t._auditTs ? Math.round((now - new Date(t._auditTs).getTime()) / 60000) : null;
+      const elapsedStr = elapsedMin != null
+        ? elapsedMin < 60 ? `${elapsedMin}m ago` : `${Math.round(elapsedMin/60)}h ago`
+        : '';
+      const sla = t.severity === 'P1' ? '15–30 min' : t.severity === 'P2' ? '2–4 hours' : 'Next business day';
+      const cleanReason = (t._auditReason || '').replace(/^Reason:\s*/i,'').replace(/\s*\|\s*Contact:.*$/,'').slice(0, 200);
+      return `
       <div class="card fade-in" style="border-left:3px solid var(--p1);margin-bottom:12px">
-        <div style="display:flex;justify-content:space-between;align-items:flex-start">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:8px">
           <div>
             <div class="mono" style="font-size:10px;color:var(--accent);margin-bottom:4px">${t.id}</div>
             <div style="font-size:13px;font-weight:600">${t.description?.slice(0,90)||''}</div>
-            <div class="meta">Escalated ${t.escalated_at?.slice(0,16)||''}</div>
+            <div class="meta">
+              Escalated ${t._auditTs?.slice(0,16)||''} ${elapsedStr ? `· ${elapsedStr}` : ''}
+              · SLA: <span style="color:var(--p2)">${sla}</span>
+            </div>
           </div>
-          <span class="badge badge-${t.severity?.toLowerCase()}">${t.severity}</span>
+          <div style="display:flex;flex-direction:column;gap:4px;align-items:flex-end">
+            <span class="badge badge-${t.severity?.toLowerCase()}">${t.severity}</span>
+            <span class="badge badge-escalated">ESCALATED</span>
+          </div>
         </div>
-        ${t.escalation_reason ? `
-          <div style="margin-top:10px;padding:8px 12px;background:rgba(255,59,92,.06);border-radius:6px;font-size:11px;color:var(--dim)">
-            Reason: ${t.escalation_reason?.replace('Reason: ','')||''}
+        ${cleanReason ? `
+          <div style="padding:8px 12px;background:rgba(255,59,92,.06);border:1px solid rgba(255,59,92,.15);border-radius:6px;font-size:11px;color:var(--text);margin-bottom:8px">
+            <span style="color:var(--dim);font-weight:700">Reason: </span>${cleanReason}
           </div>` : ''}
-        <div style="margin-top:12px;padding:10px 14px;background:rgba(255,176,32,.06);border:1px solid rgba(255,176,32,.2);border-radius:6px;font-size:12px;color:var(--p2)">
-          ⏳ Assigned to: SUPPORT-ENGINEER-TEAM · Awaiting response
+        <div style="display:flex;align-items:center;gap:10px">
+          <div style="flex:1;padding:8px 12px;background:rgba(255,176,32,.06);border:1px solid rgba(255,176,32,.2);border-radius:6px;font-size:12px;color:var(--p2)">
+            ⏳ Assigned to: SUPPORT-ENGINEER-TEAM · Awaiting response
+          </div>
+          <button class="btn btn-ghost" onclick="viewTicket('${t.id}')" style="font-size:11px;padding:8px 12px;white-space:nowrap">
+            View Details →
+          </button>
         </div>
-      </div>`).join('');
+      </div>`;
+    }).join('');
   } catch(e) {
     document.getElementById('escalatedList').innerHTML = `<div class="empty">Failed to load: ${e.message}</div>`;
   }
@@ -912,6 +1025,8 @@ async function sendChat() {
   scrollMessages();
 
   try {
+    const ctrl = new AbortController();
+    const timeout = setTimeout(() => ctrl.abort(), CHAT_TIMEOUT_MS);
     const res  = await fetch(API + `/tickets/${activeTicket.id}/chat`, {
       method:  'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -919,7 +1034,9 @@ async function sendChat() {
         message: msg,
         history: chatHistory.slice(-4),
       }),
+      signal: ctrl.signal,
     });
+    clearTimeout(timeout);
     const data = await res.json();
     document.getElementById(typingId)?.remove();
 
@@ -949,7 +1066,13 @@ async function sendChat() {
     }
   } catch(e) {
     document.getElementById(typingId)?.remove();
-    addBotMsg("Sorry, I couldn't connect to the AI. Make sure the API server is running.");
+    if (e.name === 'AbortError') {
+      addBotMsg("⏱ The AI took too long to respond. Please try again.");
+    } else if (!navigator.onLine || e.message?.toLowerCase().includes('fetch')) {
+      addBotMsg("📡 Cannot reach the API server. Please check that it is running on port 8000, then try again.");
+    } else {
+      addBotMsg(`⚠️ AI assistant error: ${e.message}. Please try again in a moment.`);
+    }
   }
 }
 
