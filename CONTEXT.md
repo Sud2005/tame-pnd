@@ -37,36 +37,49 @@ mechanisms, trust calibration, and compliance with regulatory and audit requirem
 
 ```
 tame-pnd/
-├── ingestion.py          # FastAPI server — main entry point
-├── prediction.py         # Phase 2 — Groq LLaMA prediction engine
-├── rca_engine.py         # Phase 3 — FAISS semantic search + Groq RCA synthesis
-├── normalize_dataset.py  # Converts ITSM_data.csv to clean schema
+├── ingestion.py          # FastAPI server — main entry point (Layer 1)
+├── prediction.py         # Phase 2 — Groq LLaMA prediction engine (Layer 2)
+├── rca_engine.py         # Phase 3 — FAISS semantic search + Groq RCA (Layer 3)
 ├── setup_db.py           # Creates SQLite schema + seeds data
-├── generate_tickets.py   # Synthetic ticket generator (backup if no CSV)
-├── demo_feed.py          # Feeds tickets to live API for demo
-├── inject_b.py           # Injects custom-tailored Path B tickets
-├── test_groq.py          # Groq API connectivity tester
-├── fix_db.py             # Utility to clear cached DB errors
-├── test_phase1.py        # API test suite Phase 1
-├── test_phase2.py        # API test suite Phase 2 (Groq)
-├── test_phase3.py        # API test suite Phase 3 (FAISS + RCA)
-├── view_predictions.py   # Terminal viewer for prediction output
+├── client_portal.html    # Voice-enabled client portal interface
+├── README.md             # Project overview
+├── CONTEXT.md            # Architecture & File structure
 ├── requirements.txt      # Python dependencies
 ├── .env                  # API keys (GITIGNORED)
 ├── .env.example          # Template
-├── db/
+│
+├── dashboard/            # Governance Dashboard (Layer 4)
+│   ├── package.json
+│   ├── vite.config.js
+│   ├── index.html
+│   └── src/
+│       ├── main.jsx
+│       └── App.jsx       # Complete single-file React dashboard
+│
+├── db/                   # Learning & Audit (Layer 5)
 │   ├── opsai.db          # SQLite database (GITIGNORED)
 │   ├── faiss.index       # FAISS vector index (GITIGNORED)
 │   └── memory_store.pkl  # Parallel ticket store (GITIGNORED)
+│
 ├── data/
 │   └── tickets_clean.csv # Normalized dataset (GITIGNORED)
-└── dashboard/
-    ├── package.json
-    ├── vite.config.js
-    ├── index.html
-    └── src/
-        ├── main.jsx
-        └── App.jsx       # Complete single-file React dashboard
+│
+├── scripts/              # Setup, mocks, and utilities
+│   ├── demo_feed_hackathon.py
+│   ├── generate_tickets.py
+│   ├── normalize_dataset.py
+│   └── view_predictions.py
+│
+├── docs/                 # Hackathon documentation & references
+│   ├── ANTIGRAVITY_PROMPT.md
+│   ├── hackathon_demo_features.md
+│   ├── ITSMIncidentManagement.ipynb
+│   └── setup_phase1.sh
+│
+└── tests/                # Verification suites
+    ├── test_phase1.py
+    ├── test_phase2.py
+    └── test_phase3.py
 ```
 
 ---
