@@ -58,6 +58,14 @@ except ImportError:
     RCA_ENABLED = False
     print("⚠️  Phase 3: rca_engine.py not found")
 
+try:
+    from cluster_detector import predict_incident_clusters, start_background_scanner
+    CLUSTER_ENABLED = True
+    print("✅ Phase 4: Cluster detector loaded")
+except ImportError:
+    CLUSTER_ENABLED = False
+    print("⚠️  Phase 4: cluster_detector.py not found")
+
 app = FastAPI(title="OpsAI API", version="4.0.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
@@ -71,6 +79,11 @@ async def startup_event():
             print("✅ FAISS index ready")
         except Exception as e:
             print(f"⚠️  FAISS index not ready: {e}")
+    if CLUSTER_ENABLED:
+        try:
+            start_background_scanner()
+        except Exception as e:
+            print(f"⚠️  Cluster scanner not started: {e}")
 
 
 def get_db():
@@ -494,6 +507,8 @@ class ExecuteRequest(BaseModel):
     rca_id:          Optional[str] = None
     confidence:      Optional[int] = None
     risk_tier:       Optional[str] = None
+    actual_fix:      Optional[str] = None      # What the operator actually applied (vs AI rec)
+    reasoning:       Optional[str] = None       # Why operator changed/accepted the AI's recommendation
 
 
 class RejectV2Request(BaseModel):
@@ -591,6 +606,63 @@ def execute_ticket(ticket_id: str, body: ExecuteRequest):
                 action_taken=f"Executed {fix_type} via Path {body.approval_path}",
                 reasoning=(body.operator_reason or "")[:200],
                 outcome="success")
+
+    # ── Knowledge Delta Capture ────────────────────────────────────────────────
+    # Capture what the AI recommended vs what the operator actually applied
+    ai_recommended = None
+    rca_row = conn.execute(
+        "SELECT recommended_fix FROM rca_results WHERE ticket_id=? ORDER BY created_at DESC LIMIT 1",
+        (ticket_id,)
+    ).fetchone()
+    if rca_row:
+        ai_recommended = dict(rca_row).get("recommended_fix", "")
+
+    actual_fix = body.actual_fix or body.operator_reason or fix_type
+    operator_reasoning = body.reasoning or ""
+    was_different = 0
+    delta_type = "accepted_as_is"
+
+    if ai_recommended and actual_fix:
+        # Simple difference detection — if operator text diverges significantly from AI
+        ai_lower = (ai_recommended or "").lower().strip()
+        op_lower = (actual_fix or "").lower().strip()
+        if ai_lower and op_lower and ai_lower != op_lower:
+            # Check word overlap
+            ai_words = set(ai_lower.split())
+            op_words = set(op_lower.split())
+            overlap = len(ai_words & op_words) / max(len(ai_words | op_words), 1)
+            if overlap < 0.5:
+                was_different = 1
+                delta_type = "replaced"
+            elif overlap < 0.85:
+                was_different = 1
+                delta_type = "modified"
+
+    try:
+        conn.execute("""
+            INSERT INTO knowledge_deltas
+            (id, ticket_id, category, ai_recommended_fix,
+             operator_applied_fix, operator_reasoning, operator_id,
+             was_different, delta_type, created_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?)
+        """, (
+            str(uuid.uuid4()), ticket_id, category,
+            ai_recommended or "",
+            (actual_fix or "")[:_MAX_REASON_LEN],
+            (operator_reasoning or "")[:_MAX_REASON_LEN],
+            body.operator_id,
+            was_different, delta_type,
+            now,
+        ))
+        if was_different:
+            write_audit(conn, "KNOWLEDGE_DELTA", ticket_id,
+                        operator_id=body.operator_id,
+                        action_taken=f"Operator override: {delta_type}",
+                        reasoning=f"AI: {(ai_recommended or '')[:80]} → OP: {(actual_fix or '')[:80]}",
+                        outcome=delta_type)
+    except Exception as e:
+        print(f"⚠️  Knowledge delta write failed: {e}")
+
     conn.commit()
 
     # Add to FAISS memory for future RCA
@@ -607,6 +679,7 @@ def execute_ticket(ticket_id: str, body: ExecuteRequest):
         "approval_id":  approval_id,
         "outcome":      "success",
         "fix_type":     fix_type,
+        "knowledge_delta": delta_type,
     }
 
 
@@ -1154,6 +1227,232 @@ def get_stats():
         "predictions_run":  conn.execute("SELECT COUNT(*) FROM predictions").fetchone()[0] * DEMO_SCALE,
         "rca_completed":    conn.execute("SELECT COUNT(*) FROM rca_results").fetchone()[0] * DEMO_SCALE,
         "audit_events":     conn.execute("SELECT COUNT(*) FROM audit_log").fetchone()[0],
-        "phase":            "1+2+3" if (PREDICTION_ENABLED and RCA_ENABLED) else "1+2" if PREDICTION_ENABLED else "1",
+        "active_clusters":  conn.execute("SELECT COUNT(*) FROM incident_clusters WHERE status='active'").fetchone()[0],
+        "knowledge_deltas": conn.execute("SELECT COUNT(*) FROM knowledge_deltas WHERE was_different=1").fetchone()[0],
+        "phase":            "1+2+3+4" if (PREDICTION_ENABLED and RCA_ENABLED and CLUSTER_ENABLED) else "1+2+3" if (PREDICTION_ENABLED and RCA_ENABLED) else "1+2" if PREDICTION_ENABLED else "1",
     }
     conn.close(); return s
+
+
+# ── Knowledge Delta endpoints ─────────────────────────────────────────────────
+
+@app.get("/knowledge/deltas")
+def list_knowledge_deltas(
+    category: Optional[str] = None,
+    different_only: bool = False,
+    limit: int = 100,
+    offset: int = 0,
+):
+    """List knowledge deltas — what operators changed vs AI recommendations."""
+    conn = get_db()
+    q = "SELECT * FROM knowledge_deltas WHERE 1=1"
+    params = []
+    if category:
+        q += " AND category = ?"
+        params.append(category)
+    if different_only:
+        q += " AND was_different = 1"
+    count_q = q.replace("SELECT *", "SELECT COUNT(*)")
+    total = conn.execute(count_q, params).fetchone()[0]
+    q += " ORDER BY created_at DESC LIMIT ? OFFSET ?"
+    params += [limit, offset]
+    rows = conn.execute(q, params).fetchall()
+    conn.close()
+    return {
+        "deltas": [dict(r) for r in rows],
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+    }
+
+
+@app.get("/knowledge/deltas/summary")
+def knowledge_delta_summary():
+    """Aggregated stats on how often operators override AI recommendations."""
+    conn = get_db()
+
+    total = conn.execute("SELECT COUNT(*) FROM knowledge_deltas").fetchone()[0]
+    different = conn.execute("SELECT COUNT(*) FROM knowledge_deltas WHERE was_different=1").fetchone()[0]
+    replaced = conn.execute("SELECT COUNT(*) FROM knowledge_deltas WHERE delta_type='replaced'").fetchone()[0]
+    modified = conn.execute("SELECT COUNT(*) FROM knowledge_deltas WHERE delta_type='modified'").fetchone()[0]
+    accepted = conn.execute("SELECT COUNT(*) FROM knowledge_deltas WHERE delta_type='accepted_as_is'").fetchone()[0]
+
+    # Per-category breakdown
+    by_category = conn.execute("""
+        SELECT category,
+               COUNT(*) as total,
+               SUM(CASE WHEN was_different=1 THEN 1 ELSE 0 END) as overrides,
+               ROUND(100.0 * SUM(CASE WHEN was_different=1 THEN 1 ELSE 0 END) / MAX(COUNT(*), 1), 1) as override_pct
+        FROM knowledge_deltas
+        GROUP BY category
+        ORDER BY overrides DESC
+    """).fetchall()
+
+    # Recent overrides (last 10 where operator changed the fix)
+    recent_overrides = conn.execute("""
+        SELECT ticket_id, category, ai_recommended_fix, operator_applied_fix,
+               operator_reasoning, delta_type, created_at
+        FROM knowledge_deltas
+        WHERE was_different = 1
+        ORDER BY created_at DESC
+        LIMIT 10
+    """).fetchall()
+
+    conn.close()
+    return {
+        "total_deltas":       total,
+        "total_different":    different,
+        "override_rate":      round(100.0 * different / max(total, 1), 1),
+        "replaced_count":     replaced,
+        "modified_count":     modified,
+        "accepted_count":     accepted,
+        "by_category":        [dict(r) for r in by_category],
+        "recent_overrides":   [dict(r) for r in recent_overrides],
+    }
+
+
+@app.get("/knowledge/deltas/{ticket_id}")
+def get_knowledge_delta(ticket_id: str):
+    """Get the knowledge delta for a specific ticket."""
+    conn = get_db()
+    row = conn.execute(
+        "SELECT * FROM knowledge_deltas WHERE ticket_id=? ORDER BY created_at DESC LIMIT 1",
+        (ticket_id,)
+    ).fetchone()
+    conn.close()
+    if not row:
+        return {"ticket_id": ticket_id, "status": "no_delta"}
+    return dict(row)
+
+
+# ── Predictive Incident Cluster endpoints ─────────────────────────────────────
+
+@app.get("/clusters")
+def list_clusters(status: Optional[str] = "active"):
+    """List incident clusters (default: active only)."""
+    conn = get_db()
+    if status:
+        rows = conn.execute(
+            "SELECT * FROM incident_clusters WHERE status=? ORDER BY detected_at DESC",
+            (status,)
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT * FROM incident_clusters ORDER BY detected_at DESC LIMIT 50"
+        ).fetchall()
+
+    results = []
+    for r in rows:
+        d = dict(r)
+        try:
+            d["ticket_ids"] = json.loads(d.get("ticket_ids", "[]"))
+        except Exception:
+            d["ticket_ids"] = []
+        results.append(d)
+
+    conn.close()
+    return {"clusters": results, "total": len(results)}
+
+
+@app.get("/clusters/{cluster_id}")
+def get_cluster(cluster_id: str):
+    """Get cluster detail with full ticket information."""
+    conn = get_db()
+    row = conn.execute("SELECT * FROM incident_clusters WHERE id=?", (cluster_id,)).fetchone()
+    if not row:
+        conn.close()
+        raise HTTPException(404, f"Cluster {cluster_id} not found")
+
+    cluster = dict(row)
+    try:
+        ticket_ids = json.loads(cluster.get("ticket_ids", "[]"))
+    except Exception:
+        ticket_ids = []
+
+    # Fetch full ticket details for each member
+    tickets = []
+    for tid in ticket_ids:
+        t = conn.execute("SELECT * FROM tickets WHERE id=?", (tid,)).fetchone()
+        if t:
+            tickets.append(dict(t))
+
+    conn.close()
+    cluster["ticket_ids"] = ticket_ids
+    cluster["tickets"] = tickets
+    return cluster
+
+
+@app.post("/clusters/{cluster_id}/acknowledge")
+def acknowledge_cluster(cluster_id: str, body: dict):
+    """Operator acknowledges a predicted cluster alert."""
+    conn = get_db()
+    row = conn.execute("SELECT * FROM incident_clusters WHERE id=?", (cluster_id,)).fetchone()
+    if not row:
+        conn.close()
+        raise HTTPException(404, f"Cluster {cluster_id} not found")
+
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    operator_id = body.get("operator_id", "ops_dashboard")
+
+    conn.execute("""
+        UPDATE incident_clusters
+        SET status='acknowledged', acknowledged_by=?, acknowledged_at=?
+        WHERE id=?
+    """, (operator_id, now, cluster_id))
+
+    write_audit(conn, "CLUSTER_ACK", None,
+                operator_id=operator_id,
+                action_taken=f"Acknowledged cluster {cluster_id[:12]}",
+                reasoning=f"Cluster: {dict(row).get('cluster_label', '?')}",
+                outcome="acknowledged")
+    conn.commit()
+    conn.close()
+    return {
+        "message": f"Cluster {cluster_id} acknowledged",
+        "status": "acknowledged",
+        "acknowledged_by": operator_id,
+    }
+
+
+@app.post("/clusters/scan")
+def trigger_cluster_scan():
+    """Manually trigger an incident cluster scan."""
+    if not CLUSTER_ENABLED:
+        raise HTTPException(503, "Cluster detector not loaded")
+    try:
+        clusters = predict_incident_clusters(force=False)
+        return {
+            "message": f"Scan complete — {len(clusters)} new cluster(s) detected",
+            "clusters_detected": len(clusters),
+            "clusters": [
+                {
+                    "id": c["id"],
+                    "label": c["cluster_label"],
+                    "ticket_count": c["ticket_count"],
+                    "severity": c["severity_suggestion"],
+                }
+                for c in clusters
+            ],
+        }
+    except Exception as e:
+        return {"message": f"Scan error: {str(e)[:100]}", "clusters_detected": 0}
+
+
+@app.get("/clusters/history")
+def cluster_history(limit: int = 50):
+    """All past clusters (all statuses)."""
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT * FROM incident_clusters ORDER BY detected_at DESC LIMIT ?",
+        (limit,)
+    ).fetchall()
+    results = []
+    for r in rows:
+        d = dict(r)
+        try:
+            d["ticket_ids"] = json.loads(d.get("ticket_ids", "[]"))
+        except Exception:
+            d["ticket_ids"] = []
+        results.append(d)
+    conn.close()
+    return {"clusters": results, "total": len(results)}

@@ -18,6 +18,9 @@ groq==0.9.0                      # Groq LLaMA API
 python-dotenv==1.0.1             # .env file loading
 httpx==0.27.0                    # Async HTTP for API calls
 
+# ── Phase 4 (Predictive Clustering) ────────────────────────────
+scikit-learn==1.4.2              # DBSCAN incident clustering
+
 # ── Dev / Testing ──────────────────────────────────────────────
 pytest==8.2.0
 pytest-asyncio==0.23.6

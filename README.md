@@ -3,7 +3,8 @@
 </h1>
 
 <p align="center">
-  <strong>Built for the Atos AI Hackathon</strong><br>
+  <strong>Built for the Atos AI Hackathon
+  COULDNT UPLOAD ENTIRE CODEBASE DUE TO FILE LIMIT SET AT 50 mb PLEASE CHECK THE GITHUB REPO FOR THE FULL CODEBASE</strong><br>
   <em>By Team TamePND (Sudhanshu Narvekar, Swayam Samel)</em>
 </p>
 

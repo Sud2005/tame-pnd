@@ -317,6 +317,25 @@ function TicketFeed({ onSelectTicket, selected }) {
         ))}
       </div>
 
+      {/* Cluster warning banner — shows when active clusters exist */}
+      {(stats.active_clusters || 0) > 0 && (
+        <div onClick={() => { if (typeof window.__setScreen === "function") window.__setScreen("insights"); }}
+          style={{
+            padding: "10px 16px", background: COLORS.p1 + "15",
+            border: `1px solid ${COLORS.p1}33`, borderRadius: 8,
+            display: "flex", alignItems: "center", gap: 10,
+            cursor: "pointer", animation: "fade-in 0.3s ease",
+          }}>
+          <LiveDot color={COLORS.p1} />
+          <div style={{ fontSize: 12, fontWeight: 700, color: COLORS.p1 }}>
+            ⚠ {stats.active_clusters} active incident cluster{stats.active_clusters > 1 ? "s" : ""} detected
+          </div>
+          <div style={{ fontSize: 11, color: COLORS.textDim, flex: 1 }}>
+            Multiple similar tickets clustering — click to investigate →
+          </div>
+        </div>
+      )}
+
       {/* Header + filters */}
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
@@ -492,10 +511,10 @@ function RCADetail({ ticket, onApprove }) {
         <div style={{ textAlign: "center", padding: 30 }}><Spinner /></div>
       )}
 
-      {!loading && !rca && (
+      {!loading && (!rca || rca.root_cause?.includes("temporarily unavailable") || rca.root_cause?.includes("connectivity issue")) && (
         <Card style={{ padding: 24, textAlign: "center" }}>
           <div style={{ fontSize: 14, color: COLORS.textDim, marginBottom: 16 }}>
-            No RCA available yet
+            {rca ? "RCA failed (Check API Key). Click below to retry." : "No RCA available yet"}
           </div>
           <button onClick={triggerRCA} disabled={triggering} style={{
             padding: "10px 28px", background: COLORS.accent, color: COLORS.bg,
@@ -503,7 +522,7 @@ function RCADetail({ ticket, onApprove }) {
             cursor: triggering ? "not-allowed" : "pointer", fontFamily: "inherit",
             opacity: triggering ? 0.6 : 1,
           }}>
-            {triggering ? <span style={{ display: "flex", alignItems: "center", gap: 8 }}><Spinner /> Running RCA...</span> : "▶ Run RCA"}
+            {triggering ? <span style={{ display: "flex", alignItems: "center", gap: 8 }}><Spinner /> Running RCA...</span> : (rca ? "▶ Retry RCA" : "▶ Run RCA")}
           </button>
         </Card>
       )}
@@ -647,6 +666,8 @@ function RCADetail({ ticket, onApprove }) {
 // ── Screen 3: Approval Workflow ───────────────────────────────────────────────
 function ApprovalWorkflow({ ticket, rca, pred, onComplete }) {
   const [reason, setReason] = useState("");
+  const [actualFix, setActualFix] = useState("");
+  const [opReasoning, setOpReasoning] = useState("");
   const [loading, setLoading] = useState(false);
   const [result, setResult]   = useState(null);
   const [countdown, setCountdown] = useState(null);
@@ -738,6 +759,8 @@ function ApprovalWorkflow({ ticket, rca, pred, onComplete }) {
             operator_reason: reason || rca?.recommended_fix || "Fix approved and executed",
             approval_path: path,
             rca_id: rca?.id || null,
+            actual_fix: actualFix || rca?.recommended_fix || "",
+            reasoning: opReasoning || "",
           }),
         });
         if (!apiResult || apiResult._error) {
@@ -1017,6 +1040,39 @@ function ApprovalWorkflow({ ticket, rca, pred, onComplete }) {
         <div style={{ fontSize: 13, color: COLORS.textDim, marginBottom: 20, lineHeight: 1.7 }}>
           {rca?.recommended_fix}
         </div>
+
+        {/* Knowledge Delta: Actual Fix Applied */}
+        <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 6 }}>
+          Actual Fix Applied <span style={{ color: COLORS.textDim, fontWeight: 400, fontSize: 11 }}>(modify if different from AI)</span>
+        </div>
+        <textarea
+          value={actualFix || rca?.recommended_fix || ""}
+          onChange={e => setActualFix(e.target.value)}
+          placeholder="Describe what you actually did to fix this..."
+          style={{
+            width: "100%", minHeight: 60, padding: "10px 12px", marginBottom: 14,
+            background: COLORS.surface, border: `1px solid ${COLORS.border}`,
+            borderRadius: 6, color: COLORS.text, fontSize: 12,
+            fontFamily: "inherit", resize: "vertical", outline: "none",
+          }}
+        />
+
+        {/* Knowledge Delta: Operator Reasoning */}
+        <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 6 }}>
+          Your Reasoning <span style={{ color: COLORS.textDim, fontWeight: 400, fontSize: 11 }}>(what did you know that AI didn't?)</span>
+        </div>
+        <textarea
+          value={opReasoning}
+          onChange={e => setOpReasoning(e.target.value)}
+          placeholder="e.g. I know this server needs a cold restart, not a service reload..."
+          style={{
+            width: "100%", minHeight: 50, padding: "10px 12px", marginBottom: 14,
+            background: COLORS.surface, border: `1px solid ${COLORS.border}`,
+            borderRadius: 6, color: COLORS.text, fontSize: 12,
+            fontFamily: "inherit", resize: "vertical", outline: "none",
+          }}
+        />
+
         <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 6 }}>
           Rejection Reason (required to reject)
         </div>
@@ -1068,6 +1124,37 @@ function ApprovalWorkflow({ ticket, rca, pred, onComplete }) {
         <div style={{ fontSize: 13, color: COLORS.textDim, marginBottom: 20, lineHeight: 1.7 }}>
           {rca?.recommended_fix}
         </div>
+
+        {/* Knowledge Delta: Actual Fix */}
+        <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 6 }}>
+          Actual Fix Applied <span style={{ color: COLORS.textDim, fontWeight: 400, fontSize: 11 }}>(modify if different)</span>
+        </div>
+        <textarea
+          value={actualFix || rca?.recommended_fix || ""}
+          onChange={e => setActualFix(e.target.value)}
+          placeholder="Describe what you actually did..."
+          style={{
+            width: "100%", minHeight: 60, padding: "10px 12px", marginBottom: 14,
+            background: COLORS.surface, border: `1px solid ${COLORS.border}`,
+            borderRadius: 6, color: COLORS.text, fontSize: 12,
+            fontFamily: "inherit", resize: "vertical", outline: "none",
+          }}
+        />
+        <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 6 }}>
+          Your Reasoning <span style={{ color: COLORS.textDim, fontWeight: 400, fontSize: 11 }}>(what AI didn't know)</span>
+        </div>
+        <textarea
+          value={opReasoning}
+          onChange={e => setOpReasoning(e.target.value)}
+          placeholder="Context the AI was missing..."
+          style={{
+            width: "100%", minHeight: 50, padding: "10px 12px", marginBottom: 14,
+            background: COLORS.surface, border: `1px solid ${COLORS.border}`,
+            borderRadius: 6, color: COLORS.text, fontSize: 12,
+            fontFamily: "inherit", resize: "vertical", outline: "none",
+          }}
+        />
+
         <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 8 }}>
           Senior Review Justification <span style={{ color: COLORS.p1 }}>*</span>
         </div>
@@ -2165,6 +2252,9 @@ function IngestForm({ onIngested }) {
   });
 
   const PRESETS = [
+    { label: "🔵 Path A Demo",
+      data: { description: "Minor cosmetic UI issue on internal employee portal. No user impact. Suggested fix: reload css assets for employee-dev-box-01.",
+              severity: "P3", ci_cat: "application", urgency: "4", impact: "4", alert_status: "False" } },
     { label: "🔴 P1 — DB Outage",
       data: { description: "SAN storage array reporting hardware fault, database writes failing across cluster",
               severity: "P1", ci_cat: "storage", urgency: "1", impact: "1", alert_status: "True" } },
@@ -2352,6 +2442,348 @@ function IngestForm({ onIngested }) {
   );
 }
 
+// ── Screen 6: Insights — Knowledge Deltas + Predictive Clusters ──────────────
+function InsightsScreen() {
+  const [tab, setTab] = useState("deltas"); // 'deltas' | 'clusters'
+  const [deltaSummary, setDeltaSummary] = useState(null);
+  const [deltas, setDeltas] = useState([]);
+  const [clusters, setClusters] = useState([]);
+  const [clusterHistory, setClusterHistory] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [scanning, setScanning] = useState(false);
+
+  useEffect(() => {
+    async function load() {
+      setLoading(true);
+      const [summ, dList, cList, cHist] = await Promise.all([
+        apiFetch("/knowledge/deltas/summary"),
+        apiFetch("/knowledge/deltas?limit=50&different_only=false"),
+        apiFetch("/clusters?status=active"),
+        apiFetch("/clusters/history?limit=30"),
+      ]);
+      if (summ) setDeltaSummary(summ);
+      if (dList?.deltas) setDeltas(dList.deltas);
+      if (cList?.clusters) setClusters(cList.clusters);
+      if (cHist?.clusters) setClusterHistory(cHist.clusters);
+      setLoading(false);
+    }
+    load();
+    const i = setInterval(load, 15000);
+    return () => clearInterval(i);
+  }, []);
+
+  async function scanNow() {
+    setScanning(true);
+    const res = await apiFetch("/clusters/scan", { method: "POST" });
+    if (res?.clusters_detected > 0) {
+      const cList = await apiFetch("/clusters?status=active");
+      if (cList?.clusters) setClusters(cList.clusters);
+    }
+    setScanning(false);
+  }
+
+  async function acknowledgeCluster(clusterId) {
+    await apiFetch(`/clusters/${clusterId}/acknowledge`, {
+      method: "POST",
+      body: JSON.stringify({ operator_id: "ops_dashboard" }),
+    });
+    setClusters(prev => prev.filter(c => c.id !== clusterId));
+  }
+
+  const CLUSTER_SEV_COLOR = { P1: COLORS.p1, P2: COLORS.p2, P3: COLORS.p3 };
+
+  return (
+    <div style={{ height: "100%", display: "flex", flexDirection: "column", padding: 24, gap: 16, overflow: "hidden" }}>
+      <SectionHeader
+        title="AI Insights"
+        sub="Knowledge Deltas · Predictive Clusters · Self-Improving Intelligence"
+        right={
+          <div style={{ display: "flex", gap: 8 }}>
+            {["deltas", "clusters"].map(t => (
+              <button key={t} onClick={() => setTab(t)} style={{
+                padding: "8px 18px", borderRadius: 6, border: "none", cursor: "pointer",
+                fontSize: 12, fontWeight: 700, fontFamily: "inherit",
+                background: tab === t ? COLORS.accent : COLORS.surface,
+                color: tab === t ? COLORS.bg : COLORS.textDim,
+                transition: "all 0.15s",
+              }}>{t === "deltas" ? "🧠 Knowledge Deltas" : "🔮 Clusters"}</button>
+            ))}
+          </div>
+        }
+      />
+
+      {loading && <div style={{ textAlign: "center", padding: 40 }}><Spinner /></div>}
+
+      {/* ── Knowledge Deltas Panel ─────────────────────────────────────────── */}
+      {!loading && tab === "deltas" && (
+        <div style={{ flex: 1, overflowY: "auto", display: "flex", flexDirection: "column", gap: 14 }}>
+
+          {/* Summary cards */}
+          {deltaSummary && (
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(5, 1fr)", gap: 10 }}>
+              <Card style={{ padding: "12px 14px" }}>
+                <div className="mono" style={{ fontSize: 9, color: COLORS.textDim, letterSpacing: "0.1em" }}>TOTAL DELTAS</div>
+                <div style={{ fontSize: 24, fontWeight: 800, color: COLORS.accent, lineHeight: 1.2, marginTop: 4 }}>
+                  {deltaSummary.total_deltas}
+                </div>
+              </Card>
+              <Card style={{ padding: "12px 14px" }}>
+                <div className="mono" style={{ fontSize: 9, color: COLORS.textDim, letterSpacing: "0.1em" }}>AI OVERRIDDEN</div>
+                <div style={{ fontSize: 24, fontWeight: 800, color: COLORS.p1, lineHeight: 1.2, marginTop: 4 }}>
+                  {deltaSummary.total_different}
+                </div>
+              </Card>
+              <Card style={{ padding: "12px 14px" }}>
+                <div className="mono" style={{ fontSize: 9, color: COLORS.textDim, letterSpacing: "0.1em" }}>OVERRIDE RATE</div>
+                <div style={{ fontSize: 24, fontWeight: 800, color: deltaSummary.override_rate > 30 ? COLORS.p1 : COLORS.p3, lineHeight: 1.2, marginTop: 4 }}>
+                  {deltaSummary.override_rate}%
+                </div>
+              </Card>
+              <Card style={{ padding: "12px 14px" }}>
+                <div className="mono" style={{ fontSize: 9, color: COLORS.textDim, letterSpacing: "0.1em" }}>REPLACED</div>
+                <div style={{ fontSize: 24, fontWeight: 800, color: "#CC2244", lineHeight: 1.2, marginTop: 4 }}>
+                  {deltaSummary.replaced_count}
+                </div>
+              </Card>
+              <Card style={{ padding: "12px 14px" }}>
+                <div className="mono" style={{ fontSize: 9, color: COLORS.textDim, letterSpacing: "0.1em" }}>MODIFIED</div>
+                <div style={{ fontSize: 24, fontWeight: 800, color: COLORS.p2, lineHeight: 1.2, marginTop: 4 }}>
+                  {deltaSummary.modified_count}
+                </div>
+              </Card>
+            </div>
+          )}
+
+          {/* Category breakdown */}
+          {deltaSummary?.by_category?.length > 0 && (
+            <Card style={{ padding: "14px 16px" }}>
+              <div className="mono" style={{ fontSize: 9, color: COLORS.textDim, letterSpacing: "0.1em", marginBottom: 10, fontWeight: 700 }}>
+                OVERRIDE RATE BY CATEGORY
+              </div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                {deltaSummary.by_category.map(cat => (
+                  <div key={cat.category} style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                    <div style={{ width: 100, fontSize: 11, fontWeight: 600, color: COLORS.text }}>{cat.category || "General"}</div>
+                    <div style={{ flex: 1, height: 8, background: COLORS.border, borderRadius: 4, overflow: "hidden" }}>
+                      <div style={{
+                        width: `${cat.override_pct || 0}%`, height: "100%",
+                        background: (cat.override_pct || 0) > 30 ? COLORS.p1 : COLORS.p3,
+                        borderRadius: 4, transition: "width 0.5s ease",
+                      }} />
+                    </div>
+                    <div className="mono" style={{ fontSize: 10, color: COLORS.textDim, minWidth: 80, textAlign: "right" }}>
+                      {cat.overrides}/{cat.total} ({cat.override_pct || 0}%)
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </Card>
+          )}
+
+          {/* Recent overrides table */}
+          <Card style={{ padding: "14px 16px", flex: 1 }}>
+            <div className="mono" style={{ fontSize: 9, color: COLORS.textDim, letterSpacing: "0.1em", marginBottom: 10, fontWeight: 700 }}>
+              RECENT KNOWLEDGE DELTAS
+            </div>
+            <div style={{ overflowY: "auto", maxHeight: 400 }}>
+              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11 }}>
+                <thead>
+                  <tr style={{ position: "sticky", top: 0, background: COLORS.surface }}>
+                    {["TICKET", "CATEGORY", "DELTA TYPE", "AI RECOMMENDED", "OPERATOR APPLIED", "REASONING", "TIME"].map(h => (
+                      <th key={h} className="mono" style={{
+                        padding: "8px 8px", textAlign: "left", fontSize: 9,
+                        color: COLORS.textDim, letterSpacing: "0.08em",
+                        borderBottom: `1px solid ${COLORS.border}`,
+                      }}>{h}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {deltas.map((d, i) => {
+                    const typeColor = d.delta_type === "replaced" ? "#CC2244"
+                      : d.delta_type === "modified" ? COLORS.p2
+                      : COLORS.p3;
+                    return (
+                      <tr key={d.id || i} style={{ borderBottom: `1px solid ${COLORS.border}22` }}
+                        onMouseEnter={e => e.currentTarget.style.background = COLORS.border + "33"}
+                        onMouseLeave={e => e.currentTarget.style.background = "transparent"}>
+                        <td className="mono" style={{ padding: "6px 8px", color: COLORS.accent, fontSize: 10 }}>
+                          {d.ticket_id?.slice(0, 14) || "–"}
+                        </td>
+                        <td style={{ padding: "6px 8px" }}>
+                          <Badge label={d.category || "General"} color={COLORS.textDim} />
+                        </td>
+                        <td style={{ padding: "6px 8px" }}>
+                          <Badge label={d.delta_type || "unknown"} color={typeColor} />
+                        </td>
+                        <td style={{ padding: "6px 8px", maxWidth: 180, overflow: "hidden",
+                          textOverflow: "ellipsis", whiteSpace: "nowrap", color: COLORS.textDim }}>
+                          {d.ai_recommended_fix?.slice(0, 80) || "–"}
+                        </td>
+                        <td style={{ padding: "6px 8px", maxWidth: 180, overflow: "hidden",
+                          textOverflow: "ellipsis", whiteSpace: "nowrap",
+                          color: d.was_different ? COLORS.p2 : COLORS.p3 }}>
+                          {d.operator_applied_fix?.slice(0, 80) || "–"}
+                        </td>
+                        <td style={{ padding: "6px 8px", maxWidth: 150, overflow: "hidden",
+                          textOverflow: "ellipsis", whiteSpace: "nowrap", color: COLORS.text, fontStyle: "italic" }}>
+                          {d.operator_reasoning?.slice(0, 60) || "–"}
+                        </td>
+                        <td className="mono" style={{ padding: "6px 8px", color: COLORS.textDim, fontSize: 10, whiteSpace: "nowrap" }}>
+                          {d.created_at?.slice(0, 16) || "–"}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+              {deltas.length === 0 && (
+                <div style={{ textAlign: "center", padding: 30, color: COLORS.textDim, fontSize: 12 }}>
+                  No knowledge deltas yet — approve tickets with modifications to start building your knowledge graph
+                </div>
+              )}
+            </div>
+          </Card>
+        </div>
+      )}
+
+      {/* ── Predictive Clusters Panel ──────────────────────────────────────── */}
+      {!loading && tab === "clusters" && (
+        <div style={{ flex: 1, overflowY: "auto", display: "flex", flexDirection: "column", gap: 14 }}>
+
+          {/* Scan controls */}
+          <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+            <button onClick={scanNow} disabled={scanning} style={{
+              padding: "10px 20px", background: COLORS.accent, color: COLORS.bg,
+              border: "none", borderRadius: 6, fontSize: 12, fontWeight: 700,
+              cursor: scanning ? "not-allowed" : "pointer", fontFamily: "inherit",
+            }}>
+              {scanning ? <span style={{ display: "flex", alignItems: "center", gap: 6 }}><Spinner /> Scanning...</span> : "🔮 SCAN NOW"}
+            </button>
+            <div className="mono" style={{ fontSize: 10, color: COLORS.textDim }}>
+              {clusters.length} active cluster(s) · Auto-scan every 15 min
+            </div>
+          </div>
+
+          {/* Active clusters */}
+          {clusters.length > 0 && (
+            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+              <div className="mono" style={{ fontSize: 9, color: COLORS.p1, letterSpacing: "0.1em", fontWeight: 700 }}>
+                ⚠ ACTIVE INCIDENT CLUSTERS
+              </div>
+              {clusters.map(c => {
+                const sevColor = CLUSTER_SEV_COLOR[c.severity_suggestion] || COLORS.p2;
+                return (
+                  <Card key={c.id} style={{
+                    padding: "16px 18px",
+                    borderLeft: `3px solid ${sevColor}`,
+                    animation: "fade-in 0.3s ease",
+                  }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 10 }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                        <LiveDot color={sevColor} />
+                        <div style={{ fontSize: 14, fontWeight: 800, color: COLORS.text }}>
+                          {c.cluster_label || "Unnamed Cluster"}
+                        </div>
+                        <Badge label={c.severity_suggestion || "P2"} color={sevColor} />
+                        <Badge label={`${c.ticket_count} tickets`} color={COLORS.accent} />
+                        <Badge label={`${c.time_span_minutes || 0}min span`} color={COLORS.textDim} />
+                      </div>
+                      <button onClick={() => acknowledgeCluster(c.id)} style={{
+                        padding: "6px 14px", background: COLORS.p3 + "22", color: COLORS.p3,
+                        border: `1px solid ${COLORS.p3}44`, borderRadius: 4,
+                        fontSize: 10, fontWeight: 700, cursor: "pointer", fontFamily: "inherit",
+                      }}>✓ ACKNOWLEDGE</button>
+                    </div>
+                    <div style={{ fontSize: 12, color: COLORS.textDim, lineHeight: 1.6 }}>
+                      {c.centroid_description?.slice(0, 200) || "No description"}
+                    </div>
+                    {c.ticket_ids?.length > 0 && (
+                      <div className="mono" style={{ fontSize: 10, color: COLORS.accent, marginTop: 8 }}>
+                        Tickets: {(Array.isArray(c.ticket_ids) ? c.ticket_ids : []).slice(0, 5).map(id => id?.slice(0, 12)).join(", ")}
+                        {(Array.isArray(c.ticket_ids) ? c.ticket_ids : []).length > 5 ? ` +${c.ticket_ids.length - 5} more` : ""}
+                      </div>
+                    )}
+                    <div className="mono" style={{ fontSize: 10, color: COLORS.textDim, marginTop: 6 }}>
+                      Detected: {c.detected_at?.slice(0, 16) || "–"}
+                    </div>
+                  </Card>
+                );
+              })}
+            </div>
+          )}
+
+          {clusters.length === 0 && (
+            <Card style={{ padding: 30, textAlign: "center" }}>
+              <div style={{ fontSize: 40, marginBottom: 12 }}>✅</div>
+              <div style={{ fontSize: 14, fontWeight: 700, color: COLORS.p3, marginBottom: 6 }}>No Active Clusters</div>
+              <div style={{ fontSize: 12, color: COLORS.textDim }}>
+                The system scans every 15 minutes. When 3+ similar tickets arrive within 2 hours, an alert will appear here.
+              </div>
+            </Card>
+          )}
+
+          {/* Cluster history */}
+          {clusterHistory.length > 0 && (
+            <Card style={{ padding: "14px 16px" }}>
+              <div className="mono" style={{ fontSize: 9, color: COLORS.textDim, letterSpacing: "0.1em", marginBottom: 10, fontWeight: 700 }}>
+                CLUSTER HISTORY ({clusterHistory.length})
+              </div>
+              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 11 }}>
+                <thead>
+                  <tr style={{ position: "sticky", top: 0, background: COLORS.surface }}>
+                    {["LABEL", "SEVERITY", "TICKETS", "SPAN", "STATUS", "DETECTED", "ACK BY"].map(h => (
+                      <th key={h} className="mono" style={{
+                        padding: "6px 8px", textAlign: "left", fontSize: 9,
+                        color: COLORS.textDim, letterSpacing: "0.08em",
+                        borderBottom: `1px solid ${COLORS.border}`,
+                      }}>{h}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {clusterHistory.map((c, i) => (
+                    <tr key={c.id || i} style={{ borderBottom: `1px solid ${COLORS.border}22` }}
+                      onMouseEnter={e => e.currentTarget.style.background = COLORS.border + "33"}
+                      onMouseLeave={e => e.currentTarget.style.background = "transparent"}>
+                      <td style={{ padding: "6px 8px", maxWidth: 160, overflow: "hidden",
+                        textOverflow: "ellipsis", whiteSpace: "nowrap", color: COLORS.text, fontWeight: 600 }}>
+                        {c.cluster_label || "–"}
+                      </td>
+                      <td style={{ padding: "6px 8px" }}>
+                        <Badge label={c.severity_suggestion || "?"} color={CLUSTER_SEV_COLOR[c.severity_suggestion] || COLORS.textDim} />
+                      </td>
+                      <td className="mono" style={{ padding: "6px 8px", color: COLORS.accent, fontSize: 10 }}>
+                        {c.ticket_count || 0}
+                      </td>
+                      <td className="mono" style={{ padding: "6px 8px", color: COLORS.textDim, fontSize: 10 }}>
+                        {c.time_span_minutes || 0}min
+                      </td>
+                      <td style={{ padding: "6px 8px" }}>
+                        <Badge label={c.status || "?"} color={
+                          c.status === "active" ? COLORS.p1
+                          : c.status === "acknowledged" ? COLORS.p3
+                          : COLORS.textDim
+                        } />
+                      </td>
+                      <td className="mono" style={{ padding: "6px 8px", color: COLORS.textDim, fontSize: 10, whiteSpace: "nowrap" }}>
+                        {c.detected_at?.slice(0, 16) || "–"}
+                      </td>
+                      <td className="mono" style={{ padding: "6px 8px", color: COLORS.textDim, fontSize: 10 }}>
+                        {c.acknowledged_by || "–"}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </Card>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── Main App Shell ────────────────────────────────────────────────────────────
 export default function App() {
   const [screen, setScreen]   = useState("feed");
@@ -2411,6 +2843,7 @@ export default function App() {
     { id: "approval", label: "03  APPROVAL",       icon: "⬡" },
     { id: "audit",    label: "04  AUDIT TRAIL",    icon: "⬡" },
     { id: "memory",   label: "05  MEMORY",          icon: "⬡" },
+    { id: "insights", label: "06  INSIGHTS",        icon: "⬡" },
   ];
 
   return (
@@ -2477,6 +2910,7 @@ export default function App() {
         )}
         {screen === "audit"    && <AuditTrail />}
         {screen === "memory"   && <MemoryBrowser />}
+        {screen === "insights" && <InsightsScreen />}
       </div>
 
       {/* Floating ingest button — always visible */}
@@ -2489,7 +2923,7 @@ export default function App() {
         background: COLORS.surface, flexShrink: 0,
       }}>
         <div className="mono" style={{ fontSize: 9, color: COLORS.textDim }}>
-          PHASE 1+2+3 · GROQ LLAMA-3.3-70B · FAISS · SQLITE
+          PHASE 1+2+3+4 · GROQ LLAMA-3.3-70B · FAISS · DBSCAN · SQLITE
         </div>
         <div className="mono" style={{ fontSize: 9, color: COLORS.textDim }}>
           {selected ? `SELECTED: ${selected.id}` : "NO TICKET SELECTED"}

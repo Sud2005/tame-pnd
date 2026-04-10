@@ -134,12 +134,45 @@ CREATE TABLE IF NOT EXISTS audit_log (
     timestamp           TEXT DEFAULT (datetime('now'))
 );
 
+-- Knowledge delta: AI vs operator reasoning gap
+CREATE TABLE IF NOT EXISTS knowledge_deltas (
+    id                   TEXT PRIMARY KEY,
+    ticket_id            TEXT NOT NULL,
+    category             TEXT,
+    ai_recommended_fix   TEXT,
+    operator_applied_fix TEXT,
+    operator_reasoning   TEXT,
+    operator_id          TEXT,
+    was_different        INTEGER DEFAULT 0,
+    delta_type           TEXT,
+    created_at           TEXT DEFAULT (datetime('now')),
+    FOREIGN KEY (ticket_id) REFERENCES tickets(id)
+);
+
+-- Predictive incident clusters
+CREATE TABLE IF NOT EXISTS incident_clusters (
+    id                   TEXT PRIMARY KEY,
+    cluster_label        TEXT,
+    ticket_ids           TEXT,
+    ticket_count         INTEGER,
+    time_span_minutes    REAL,
+    centroid_description TEXT,
+    severity_suggestion  TEXT,
+    status               TEXT DEFAULT 'active',
+    detected_at          TEXT DEFAULT (datetime('now')),
+    acknowledged_by      TEXT,
+    acknowledged_at      TEXT
+);
+
 -- Indexes for performance
-CREATE INDEX IF NOT EXISTS idx_tickets_status   ON tickets(status);
-CREATE INDEX IF NOT EXISTS idx_tickets_severity ON tickets(severity);
-CREATE INDEX IF NOT EXISTS idx_audit_ticket     ON audit_log(ticket_id);
-CREATE INDEX IF NOT EXISTS idx_audit_type       ON audit_log(event_type);
-CREATE INDEX IF NOT EXISTS idx_audit_time       ON audit_log(timestamp);
+CREATE INDEX IF NOT EXISTS idx_tickets_status    ON tickets(status);
+CREATE INDEX IF NOT EXISTS idx_tickets_severity  ON tickets(severity);
+CREATE INDEX IF NOT EXISTS idx_audit_ticket      ON audit_log(ticket_id);
+CREATE INDEX IF NOT EXISTS idx_audit_type        ON audit_log(event_type);
+CREATE INDEX IF NOT EXISTS idx_audit_time        ON audit_log(timestamp);
+CREATE INDEX IF NOT EXISTS idx_deltas_ticket     ON knowledge_deltas(ticket_id);
+CREATE INDEX IF NOT EXISTS idx_deltas_category   ON knowledge_deltas(category);
+CREATE INDEX IF NOT EXISTS idx_clusters_status   ON incident_clusters(status);
 """
 
 # ─── Fix type seeds for trust calibration table ──────────────────────────────
