@@ -21,6 +21,9 @@ httpx==0.27.0                    # Async HTTP for API calls
 # ── Phase 4 (Predictive Clustering) ────────────────────────────
 scikit-learn==1.4.2              # DBSCAN incident clustering
 
+# ── Phase 5 (Compliance + Federated) ───────────────────────────
+fpdf2==2.7.9                     # PDF compliance report generation
+
 # ── Dev / Testing ──────────────────────────────────────────────
 pytest==8.2.0
 pytest-asyncio==0.23.6

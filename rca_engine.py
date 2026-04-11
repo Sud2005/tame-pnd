@@ -380,18 +380,29 @@ def search_similar(description: str, k: int = 5, exclude_ticket_id: str = None) 
 
 # ── Confidence calibration ────────────────────────────────────────────────────
 
-def calibrate_confidence(raw_confidence: int, similar: list[dict], ticket: dict) -> int:
+# Federated learning: import cross-org signal boost
+try:
+    from federated_learning import get_federated_confidence_boost
+    _FEDERATED_AVAILABLE = True
+except ImportError:
+    _FEDERATED_AVAILABLE = False
+
+
+def calibrate_confidence(raw_confidence: int, similar: list[dict], ticket: dict) -> tuple[int, dict | None]:
     """
     Calibrate the LLM's raw confidence using objective signals:
       - Average similarity score of top matches
       - Whether resolution notes exist in the matches
       - Historical fix outcome data for the category
       - Severity alignment between new and matched tickets
+      - Cross-organisation federated learning signals
     
-    Returns adjusted confidence score 0-100.
+    Returns (adjusted_confidence, federated_signal_or_None).
     """
+    federated_signal = None
+
     if not similar:
-        return max(10, raw_confidence // 2)
+        return max(10, raw_confidence // 2), None
 
     # 1. Average similarity of top matches (0-100 scale)
     avg_sim = float(np.mean([s.get("similarity_pct", 0) for s in similar[:3]]))
@@ -449,7 +460,19 @@ def calibrate_confidence(raw_confidence: int, similar: list[dict], ticket: dict)
     if similar and avg_sim > 80 and has_resolution >= 2:
         calibrated = max(calibrated, 75)
 
-    return max(10, min(95, calibrated))
+    # 6. Cross-organisation federated learning boost
+    if _FEDERATED_AVAILABLE:
+        try:
+            federated_signal = get_federated_confidence_boost(ticket_cat)
+            if federated_signal and federated_signal.get("boost", 0) != 0:
+                calibrated += federated_signal["boost"]
+                print(f"   🌐 Federated boost: {federated_signal['boost']:+d} "
+                      f"(cross-org rate: {federated_signal['cross_org_success_rate']:.1%}, "
+                      f"{federated_signal['contributing_orgs']} orgs)")
+        except Exception as e:
+            print(f"   ⚠️  Federated signal failed: {e}")
+
+    return max(10, min(95, calibrated)), federated_signal
 
 
 def determine_risk_tier(confidence: int, severity: str, similar: list[dict]) -> str:
@@ -528,18 +551,41 @@ Context:     {context}
 
 Based on the patterns in these past incidents, perform a thorough RCA.
 Provide a CONCRETE root cause and actionable fix. Be specific, not vague.
-CRITICAL INSTRUCTION: The past incidents only have brief resolutions. You MUST expand them into a detailed, multi-step sequence (at least 3-5 distinct steps) for the "fix_steps" array. Outline the exact troubleshooting, execution, and verification steps. DO NOT merely return a single string.
+
+=== CRITICAL: DETAILED STEP-BY-STEP RESOLUTION GUIDE ===
+You MUST provide a comprehensive, detailed step-by-step resolution guide in the "fix_steps" array.
+Each step must be a COMPLETE instruction that a junior engineer can follow without additional context.
+
+RULES FOR fix_steps:
+1. Provide EXACTLY 5 to 7 steps — no fewer, no more.
+2. Each step MUST include:
+   - WHAT to do (the specific action)
+   - HOW to do it (exact commands, tools, or UI paths where applicable)
+   - WHAT to verify (how to confirm the step succeeded)
+3. Step 1 must always be DIAGNOSIS / VERIFICATION of the issue.
+4. Step 2 must always be BACKUP / PRE-CHECK before making changes.
+5. Middle steps should be the actual FIX actions.
+6. Second-to-last step must be VALIDATION that the fix worked.
+7. Last step must be POST-FIX MONITORING and documentation.
+
+Example of a GOOD step:
+"Step 1: Verify the issue — SSH into the affected server (ssh admin@prod-db-01), check service status with 'systemctl status postgresql', review last 50 lines of logs with 'journalctl -u postgresql -n 50'. Confirm the error matches the reported symptoms."
+
+Example of a BAD step (too short):
+"Restart the service"
 
 Respond ONLY with valid JSON. No markdown. No explanation outside the JSON.
 
 {{
-  "root_cause": "Clear, specific explanation of the root cause.",
-  "recommended_fix": "The single most important specific action to take.",
+  "root_cause": "Clear, specific explanation of the root cause — what component failed and why.",
+  "recommended_fix": "The single most important specific action to take (one sentence summary).",
   "fix_steps": [
-    "Step 1: Verify and isolate the issue...",
-    "Step 2: Pre-check or backup...",
-    "Step 3: Apply the primary fix...",
-    "Step 4: Verify recovery..."
+    "Step 1 — Diagnose & Verify: [detailed instructions with commands and what to look for]",
+    "Step 2 — Backup & Pre-check: [detailed instructions for safety measures before changes]",
+    "Step 3 — Primary Fix Action: [detailed instructions with exact commands or procedures]",
+    "Step 4 — Secondary Fix Action: [any additional configuration or cleanup needed]",
+    "Step 5 — Validate Recovery: [detailed verification steps to confirm the fix worked]",
+    "Step 6 — Monitor & Document: [what to watch for in the next 30 minutes, how to update the ticket]"
   ],
   "estimated_resolution_hrs": number,
   "pattern_match": "What common pattern across the past incidents led to this diagnosis",
@@ -606,12 +652,15 @@ def run_rca(ticket_id: str) -> dict:
                     "You are an expert IT operations engineer performing root cause analysis. "
                     "Always respond with valid JSON only. No markdown. No extra text. "
                     "Be specific and actionable in your analysis. "
-                    "CRITICAL: The 'fix_steps' array MUST contain a detailed, multi-step (at least 3-5 steps) troubleshooting and resolution guide. Never output a single step."
+                    "CRITICAL: The 'fix_steps' array MUST contain 5-7 highly detailed steps. "
+                    "Each step must be at least 2 sentences long, including what to do, how to do it (commands/tools), "
+                    "and how to verify success. A junior engineer must be able to follow your steps without asking questions. "
+                    "NEVER output fewer than 5 steps. NEVER output single-sentence steps."
                 )
             },
             {"role": "user", "content": prompt}
         ]
-        raw = _groq_chat_with_retry(messages, max_tokens=1500)
+        raw = _groq_chat_with_retry(messages, max_tokens=2500)
 
         # ── Step 3: Parse response ────────────────────────────────────────────
         parsed = _parse_rca_response(raw)
@@ -619,7 +668,7 @@ def run_rca(ticket_id: str) -> dict:
         # ── Step 4: Calibrate confidence + determine risk ─────────────────────
         # Don't trust the LLM's confidence blindly — calibrate with data
         raw_conf   = parsed.get("raw_confidence", 60)
-        confidence = calibrate_confidence(raw_conf, similar, ticket)
+        confidence, federated_signal = calibrate_confidence(raw_conf, similar, ticket)
         
         # DEMO OVERRIDE: Force Path A for the specific demo ticket
         if "Minor cosmetic UI issue on internal employee portal" in ticket.get("description", ""):
@@ -657,6 +706,7 @@ def run_rca(ticket_id: str) -> dict:
             ],
             "model_used":   GROQ_MODEL,
             "status":       "success",
+            "federated_signal": federated_signal,
         }
 
     except Exception as e:
@@ -742,6 +792,27 @@ def _parse_rca_response(raw: str) -> dict:
     p["recommended_fix"]          = str(p.get("recommended_fix", "Escalate to senior engineer"))
     p["fix_steps"]                = p.get("fix_steps", [])
     if not isinstance(p["fix_steps"], list): p["fix_steps"] = [str(p["fix_steps"])]
+
+    # ── Fix steps quality enforcement ──────────────────────────────────────────
+    # If the LLM returned fewer than 3 steps, expand them from recommended_fix
+    if len(p["fix_steps"]) < 3:
+        rec = p["recommended_fix"]
+        synthetic_steps = [
+            f"Step 1 — Diagnose & Verify: Log into the affected system and verify the reported issue is active. Check service status, review recent logs (last 30 minutes), and confirm the symptoms match the ticket description: '{rec[:60]}...'",
+            f"Step 2 — Backup & Pre-check: Before making any changes, capture the current system state. Take a configuration snapshot, note current resource utilisation (CPU, memory, disk, connections), and verify that a rollback path exists.",
+            f"Step 3 — Apply Primary Fix: {rec}. Execute this action carefully, monitoring system responses in real-time. If any unexpected errors occur, pause and assess before continuing.",
+            f"Step 4 — Validate Recovery: After applying the fix, verify the issue is resolved. Check service health endpoints, confirm normal operation in logs, and test the affected functionality end-to-end.",
+            f"Step 5 — Monitor & Document: Monitor the system for the next 15-30 minutes to ensure stability. Update the ticket with resolution details, document any configuration changes made, and set a follow-up reminder for 24 hours.",
+        ]
+        p["fix_steps"] = synthetic_steps
+    # Clean step prefixes (remove duplicate "Step N:" if LLM added them)
+    cleaned = []
+    for step in p["fix_steps"]:
+        s = str(step).strip()
+        if s:
+            cleaned.append(s)
+    p["fix_steps"] = cleaned
+
     p["estimated_resolution_hrs"] = float(p.get("estimated_resolution_hrs", 2.0))
     p["pattern_match"]            = str(p.get("pattern_match", ""))
     p["source_citations"]         = p.get("source_citations", [])

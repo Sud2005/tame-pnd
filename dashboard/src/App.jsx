@@ -424,11 +424,12 @@ function RCADetail({ ticket, onApprove }) {
   const [pred, setPred] = useState(null);
   const [loading, setLoading] = useState(false);
   const [triggering, setTriggering] = useState(false);
+  const [fedSignal, setFedSignal] = useState(null);
 
   const [executions, setExecutions] = useState([]);
 
   useEffect(() => {
-    if (!ticket) { setRca(null); setPred(null); setExecutions([]); return; }
+    if (!ticket) { setRca(null); setPred(null); setExecutions([]); setFedSignal(null); return; }
     setLoading(true);
     Promise.all([
       apiFetch(`/tickets/${ticket.id}/rca/result`),
@@ -439,6 +440,11 @@ function RCADetail({ ticket, onApprove }) {
       setPred(p?.status !== "pending" ? p : null);
       setExecutions(ex?.executions || []);
       setLoading(false);
+      // Fetch federated signal if we have a category
+      const cat = p?.predicted_category || ticket.category || "General";
+      apiFetch(`/federated/signal/${encodeURIComponent(cat)}`).then(sig => {
+        if (sig && !sig._error && sig.contributing_orgs > 0) setFedSignal(sig);
+      }).catch(() => {});
     });
   }, [ticket?.id]);
 
@@ -505,6 +511,53 @@ function RCADetail({ ticket, onApprove }) {
           </div>
         )}
       </Card>
+
+      {/* Federated Intelligence Signal */}
+      {fedSignal && fedSignal.contributing_orgs > 0 && (
+        <Card style={{ padding: 16, borderLeft: `3px solid #7B61FF` }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+            <div>
+              <div className="mono" style={{ fontSize: 9, color: "#7B61FF", letterSpacing: "0.1em", fontWeight: 700, marginBottom: 8 }}>
+                🌐 CROSS-ORGANISATION FEDERATED INTELLIGENCE
+              </div>
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 8 }}>
+                <Badge label={`${fedSignal.contributing_orgs} orgs`} color="#7B61FF" />
+                <Badge label={`${(fedSignal.cross_org_success_rate * 100).toFixed(1)}% success rate`}
+                  color={fedSignal.cross_org_success_rate >= 0.8 ? COLORS.p3 : fedSignal.cross_org_success_rate >= 0.6 ? COLORS.p2 : COLORS.p1} />
+                <Badge label={`${fedSignal.total_cross_org_fixes.toLocaleString()} fixes analysed`} color={COLORS.accent} />
+                <Badge label={`${fedSignal.boost >= 0 ? "+" : ""}${fedSignal.boost} confidence`}
+                  color={fedSignal.boost >= 0 ? COLORS.p3 : COLORS.p1} />
+                <Badge label={fedSignal.signal_strength} color={
+                  fedSignal.signal_strength === "strong" ? COLORS.p3
+                  : fedSignal.signal_strength === "moderate" ? COLORS.p2 : COLORS.textDim
+                } />
+              </div>
+            </div>
+          </div>
+          <div style={{ fontSize: 11, color: COLORS.textDim, lineHeight: 1.6 }}>
+            Cross-org fix outcomes from {fedSignal.contributing_orgs} organisations
+            inform AI confidence. Success rate of {(fedSignal.cross_org_success_rate * 100).toFixed(1)}%
+            across {fedSignal.total_cross_org_fixes.toLocaleString()} similar fixes
+            {fedSignal.boost !== 0 && ` → confidence adjusted by ${fedSignal.boost >= 0 ? "+" : ""}${fedSignal.boost} points`}.
+            <span className="mono" style={{ fontSize: 9, color: "#7B61FF", marginLeft: 6 }}>No raw data shared — differential privacy</span>
+          </div>
+          {fedSignal.org_signals?.length > 0 && (
+            <div style={{ marginTop: 10, display: "flex", gap: 6, flexWrap: "wrap" }}>
+              {fedSignal.org_signals.slice(0, 5).map((org, i) => (
+                <div key={i} style={{
+                  padding: "4px 10px", background: "#7B61FF10", border: "1px solid #7B61FF22",
+                  borderRadius: 4, fontSize: 10, color: COLORS.text,
+                }}>
+                  <span style={{ fontWeight: 700, color: "#7B61FF" }}>{org.org_name}</span>
+                  <span style={{ color: COLORS.textDim, marginLeft: 6 }}>
+                    {(org.success_rate * 100).toFixed(0)}% ({org.total} fixes)
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+        </Card>
+      )}
 
       {/* RCA section */}
       {loading && (
@@ -645,6 +698,22 @@ function RCADetail({ ticket, onApprove }) {
           }}>
             PROCEED TO APPROVAL WORKFLOW →
           </button>
+
+          {/* Download Compliance Report — shown for resolved tickets */}
+          {(ticket.status === "resolved" || ticket.status === "rolled_back" || ticket.status === "rejected") && (
+            <button onClick={() => {
+              window.open(`${API}/tickets/${ticket.id}/compliance_report`, "_blank");
+            }} style={{
+              width: "100%", padding: "12px", marginTop: 8,
+              background: "linear-gradient(135deg, #7B61FF15 0%, #7B61FF08 100%)",
+              color: "#7B61FF", border: "1px solid #7B61FF44", borderRadius: 8,
+              fontSize: 13, fontWeight: 700, cursor: "pointer", fontFamily: "inherit",
+              letterSpacing: "0.04em", display: "flex", alignItems: "center",
+              justifyContent: "center", gap: 8,
+            }}>
+              📄 Download Compliance Report (PDF)
+            </button>
+          )}
 
           {/* Execution history */}
           {executions.length > 0 && (
@@ -1897,6 +1966,21 @@ function SolutionModal({ ticket, onClose }) {
             <Badge label={`Path ${rca.approval_path}`} color={COLORS.accent} />
           )}
         </div>
+
+        {/* Download Compliance Report */}
+        {(ticket.status === "resolved" || ticket.status === "rolled_back") && (
+          <button onClick={() => {
+            window.open(`${API}/tickets/${ticket.id}/compliance_report`, "_blank");
+          }} style={{
+            width: "100%", marginTop: 10, padding: "10px",
+            background: "linear-gradient(135deg, #7B61FF15 0%, #7B61FF08 100%)",
+            color: "#7B61FF", border: "1px solid #7B61FF44", borderRadius: 6,
+            fontSize: 12, fontWeight: 700, cursor: "pointer", fontFamily: "inherit",
+            display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
+          }}>
+            📄 Download Compliance Report (PDF)
+          </button>
+        )}
       </div>
     </div>
   );
@@ -2444,27 +2528,30 @@ function IngestForm({ onIngested }) {
 
 // ── Screen 6: Insights — Knowledge Deltas + Predictive Clusters ──────────────
 function InsightsScreen() {
-  const [tab, setTab] = useState("deltas"); // 'deltas' | 'clusters'
+  const [tab, setTab] = useState("deltas"); // 'deltas' | 'clusters' | 'federated'
   const [deltaSummary, setDeltaSummary] = useState(null);
   const [deltas, setDeltas] = useState([]);
   const [clusters, setClusters] = useState([]);
   const [clusterHistory, setClusterHistory] = useState([]);
+  const [fedStats, setFedStats] = useState(null);
   const [loading, setLoading] = useState(true);
   const [scanning, setScanning] = useState(false);
 
   useEffect(() => {
     async function load() {
       setLoading(true);
-      const [summ, dList, cList, cHist] = await Promise.all([
+      const [summ, dList, cList, cHist, fedS] = await Promise.all([
         apiFetch("/knowledge/deltas/summary"),
         apiFetch("/knowledge/deltas?limit=50&different_only=false"),
         apiFetch("/clusters?status=active"),
         apiFetch("/clusters/history?limit=30"),
+        apiFetch("/federated/stats"),
       ]);
       if (summ) setDeltaSummary(summ);
       if (dList?.deltas) setDeltas(dList.deltas);
       if (cList?.clusters) setClusters(cList.clusters);
       if (cHist?.clusters) setClusterHistory(cHist.clusters);
+      if (fedS && !fedS._error) setFedStats(fedS);
       setLoading(false);
     }
     load();
@@ -2499,14 +2586,14 @@ function InsightsScreen() {
         sub="Knowledge Deltas · Predictive Clusters · Self-Improving Intelligence"
         right={
           <div style={{ display: "flex", gap: 8 }}>
-            {["deltas", "clusters"].map(t => (
+            {["deltas", "clusters", "federated"].map(t => (
               <button key={t} onClick={() => setTab(t)} style={{
                 padding: "8px 18px", borderRadius: 6, border: "none", cursor: "pointer",
                 fontSize: 12, fontWeight: 700, fontFamily: "inherit",
                 background: tab === t ? COLORS.accent : COLORS.surface,
                 color: tab === t ? COLORS.bg : COLORS.textDim,
                 transition: "all 0.15s",
-              }}>{t === "deltas" ? "🧠 Knowledge Deltas" : "🔮 Clusters"}</button>
+              }}>{t === "deltas" ? "🧠 Knowledge Deltas" : t === "clusters" ? "🔮 Clusters" : "🌐 Federated"}</button>
             ))}
           </div>
         }
@@ -2780,6 +2867,159 @@ function InsightsScreen() {
           )}
         </div>
       )}
+
+      {/* ── Federated Learning Panel ───────────────────────────────────── */}
+      {!loading && tab === "federated" && (
+        <div style={{ flex: 1, overflowY: "auto", display: "flex", flexDirection: "column", gap: 14 }}>
+
+          {/* Network header */}
+          <Card style={{ padding: "16px 20px", borderLeft: "3px solid #7B61FF" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
+              <div>
+                <div style={{ fontSize: 16, fontWeight: 800, color: "#7B61FF", marginBottom: 4 }}>
+                  {fedStats?.network_name || "Federated Network"}
+                </div>
+                <div style={{ fontSize: 12, color: COLORS.textDim, lineHeight: 1.6 }}>
+                  {fedStats?.protocol} · {fedStats?.privacy}
+                </div>
+              </div>
+              <div style={{ textAlign: "right" }}>
+                <Badge label={fedStats?.network_health === "healthy" ? "HEALTHY" : "DEGRADED"}
+                  color={fedStats?.network_health === "healthy" ? COLORS.p3 : COLORS.p1} size="lg" />
+              </div>
+            </div>
+          </Card>
+
+          {/* Network stats cards */}
+          {fedStats && (
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 10 }}>
+              <Card style={{ padding: "12px 14px" }}>
+                <div className="mono" style={{ fontSize: 9, color: COLORS.textDim, letterSpacing: "0.1em" }}>ORGANISATIONS</div>
+                <div style={{ fontSize: 24, fontWeight: 800, color: "#7B61FF", lineHeight: 1.2, marginTop: 4 }}>
+                  {fedStats.active_organisations}/{fedStats.total_organisations}
+                </div>
+              </Card>
+              <Card style={{ padding: "12px 14px" }}>
+                <div className="mono" style={{ fontSize: 9, color: COLORS.textDim, letterSpacing: "0.1em" }}>TOTAL TICKET VOLUME</div>
+                <div style={{ fontSize: 24, fontWeight: 800, color: COLORS.accent, lineHeight: 1.2, marginTop: 4 }}>
+                  {(fedStats.total_ticket_volume || 0).toLocaleString()}
+                </div>
+              </Card>
+              <Card style={{ padding: "12px 14px" }}>
+                <div className="mono" style={{ fontSize: 9, color: COLORS.textDim, letterSpacing: "0.1em" }}>SHARED SIGNALS</div>
+                <div style={{ fontSize: 24, fontWeight: 800, color: COLORS.p3, lineHeight: 1.2, marginTop: 4 }}>
+                  {(fedStats.total_shared_signals || 0).toLocaleString()}
+                </div>
+              </Card>
+              <Card style={{ padding: "12px 14px" }}>
+                <div className="mono" style={{ fontSize: 9, color: COLORS.textDim, letterSpacing: "0.1em" }}>LAST SYNC</div>
+                <div style={{ fontSize: 14, fontWeight: 800, color: COLORS.textDim, lineHeight: 1.2, marginTop: 8 }}>
+                  {fedStats.last_sync?.slice(11, 16) || "—"}
+                </div>
+              </Card>
+            </div>
+          )}
+
+          {/* Organisation cards */}
+          {fedStats?.organisations?.length > 0 && (
+            <Card style={{ padding: "14px 16px" }}>
+              <div className="mono" style={{ fontSize: 9, color: "#7B61FF", letterSpacing: "0.1em", marginBottom: 10, fontWeight: 700 }}>
+                PARTICIPATING ORGANISATIONS
+              </div>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 8 }}>
+                {fedStats.organisations.map(org => (
+                  <div key={org.id} style={{
+                    padding: "12px 14px", background: COLORS.surface,
+                    border: `1px solid ${COLORS.border}`, borderRadius: 6,
+                    borderLeft: `3px solid #7B61FF`,
+                  }}>
+                    <div style={{ fontSize: 13, fontWeight: 700, color: COLORS.text, marginBottom: 4 }}>
+                      {org.name}
+                    </div>
+                    <div className="mono" style={{ fontSize: 10, color: COLORS.textDim }}>
+                      {org.region} · {org.ticket_volume?.toLocaleString()} tickets
+                    </div>
+                    <div style={{ display: "flex", gap: 6, marginTop: 6 }}>
+                      <Badge label={org.status} color={org.status === "active" ? COLORS.p3 : COLORS.textDim} />
+                      <Badge label={`Since ${org.joined}`} color={COLORS.textDim} />
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </Card>
+          )}
+
+          {/* Category success rates */}
+          {fedStats?.category_breakdown?.length > 0 && (
+            <Card style={{ padding: "14px 16px" }}>
+              <div className="mono" style={{ fontSize: 9, color: "#7B61FF", letterSpacing: "0.1em", marginBottom: 10, fontWeight: 700 }}>
+                CROSS-ORG FIX SUCCESS RATES BY CATEGORY
+              </div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                {fedStats.category_breakdown.map(cat => {
+                  const pct = Math.round(cat.success_rate * 100);
+                  const barColor = pct >= 80 ? COLORS.p3 : pct >= 60 ? COLORS.p2 : COLORS.p1;
+                  return (
+                    <div key={cat.category} style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                      <div style={{ width: 120, fontSize: 12, fontWeight: 600, color: COLORS.text }}>{cat.category}</div>
+                      <div style={{ flex: 1, height: 10, background: COLORS.border, borderRadius: 5, overflow: "hidden" }}>
+                        <div style={{
+                          width: `${pct}%`, height: "100%",
+                          background: `linear-gradient(90deg, ${barColor}88, ${barColor})`,
+                          borderRadius: 5, transition: "width 0.5s ease",
+                        }} />
+                      </div>
+                      <div className="mono" style={{ fontSize: 11, color: barColor, minWidth: 40, textAlign: "right", fontWeight: 700 }}>
+                        {pct}%
+                      </div>
+                      <div className="mono" style={{ fontSize: 10, color: COLORS.textDim, minWidth: 80, textAlign: "right" }}>
+                        {cat.total_fixes.toLocaleString()} fixes · {cat.contributing_orgs} orgs
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </Card>
+          )}
+
+          {/* Recent syncs */}
+          {fedStats?.recent_syncs?.length > 0 && (
+            <Card style={{ padding: "14px 16px" }}>
+              <div className="mono" style={{ fontSize: 9, color: COLORS.textDim, letterSpacing: "0.1em", marginBottom: 10, fontWeight: 700 }}>
+                RECENT SIGNAL EXCHANGES
+              </div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                {fedStats.recent_syncs.map((sync, i) => (
+                  <div key={i} style={{
+                    display: "flex", alignItems: "center", gap: 10, padding: "6px 10px",
+                    background: i % 2 === 0 ? COLORS.surface : "transparent", borderRadius: 4,
+                  }}>
+                    <Badge label={sync.signal_type} color={
+                      sync.signal_type === "success" ? COLORS.p3 : COLORS.p1
+                    } />
+                    <span style={{ fontSize: 11, fontWeight: 600, color: "#7B61FF" }}>{sync.org_name}</span>
+                    <span style={{ fontSize: 11, color: COLORS.textDim }}>{sync.region}</span>
+                    <Badge label={sync.category} color={COLORS.textDim} />
+                    <span className="mono" style={{ fontSize: 10, color: COLORS.textDim, marginLeft: "auto" }}>
+                      {sync.synced_at?.slice(11, 16)}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </Card>
+          )}
+
+          {!fedStats && (
+            <Card style={{ padding: 30, textAlign: "center" }}>
+              <div style={{ fontSize: 40, marginBottom: 12 }}>🌐</div>
+              <div style={{ fontSize: 14, fontWeight: 700, color: COLORS.textDim, marginBottom: 6 }}>Federated Network Unavailable</div>
+              <div style={{ fontSize: 12, color: COLORS.textDim }}>
+                The federated learning module is not loaded. Ensure federated_learning.py is present.
+              </div>
+            </Card>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -2923,7 +3163,7 @@ export default function App() {
         background: COLORS.surface, flexShrink: 0,
       }}>
         <div className="mono" style={{ fontSize: 9, color: COLORS.textDim }}>
-          PHASE 1+2+3+4 · GROQ LLAMA-3.3-70B · FAISS · DBSCAN · SQLITE
+          PHASE 1+2+3+4+5 · GROQ LLAMA-3.3-70B · FAISS · DBSCAN · FEDERATED · SQLITE
         </div>
         <div className="mono" style={{ fontSize: 9, color: COLORS.textDim }}>
           {selected ? `SELECTED: ${selected.id}` : "NO TICKET SELECTED"}

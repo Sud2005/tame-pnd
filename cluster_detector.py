@@ -68,11 +68,11 @@ def predict_incident_clusters(force: bool = False) -> list[dict]:
     rows = conn.execute("""
         SELECT id, description, severity, category, opened_at, status
         FROM   tickets
-        WHERE  created_at >= ?
+        WHERE  opened_at >= ?
           AND  status NOT IN ('resolved', 'user_cancelled')
           AND  description IS NOT NULL
           AND  description != ''
-        ORDER  BY created_at DESC
+        ORDER  BY opened_at DESC
         LIMIT  500
     """, (cutoff,)).fetchall()
 

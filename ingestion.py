@@ -19,7 +19,7 @@ from datetime import datetime
 from typing import Optional, List
 
 from fastapi import FastAPI, HTTPException, BackgroundTasks, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -248,6 +248,15 @@ def bg_rca(ticket_id):
         print(f"⚠️  bg_rca ({ticket_id}): {e}")
 
 
+def bg_cluster():
+    if not CLUSTER_ENABLED:
+        return
+    try:
+        predict_incident_clusters()
+    except Exception as e:
+        print(f"⚠️  bg_cluster: {e}")
+
+
 @app.get("/health")
 def health():
     return {
@@ -323,6 +332,8 @@ def ingest_ticket(ticket: TicketIngest, bg: BackgroundTasks):
         bg.add_task(bg_rca, tid)
     # Notify connected WebSocket clients about the new ticket
     bg.add_task(_ws_broadcast, {"type": "new_ticket", "id": tid})
+    if CLUSTER_ENABLED:
+        bg.add_task(bg_cluster)
 
     return TicketResponse(
         id=tid, description=ticket.description, severity=severity, category=category,
@@ -379,6 +390,8 @@ def bulk_ingest(tickets: List[BulkIngestItem], bg: BackgroundTasks):
             results.append({"id": tid, "severity": severity, "category": category})
 
         conn.commit()
+        if CLUSTER_ENABLED:
+            bg.add_task(bg_cluster)
     finally:
         conn.close()
 
@@ -1456,3 +1469,85 @@ def cluster_history(limit: int = 50):
         results.append(d)
     conn.close()
     return {"clusters": results, "total": len(results)}
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Phase 5 — Compliance Report + Explainability + Federated Learning Endpoints
+# ══════════════════════════════════════════════════════════════════════════════
+
+# ── Compliance / Explainability ───────────────────────────────────────────────
+
+try:
+    from compliance_report import generate_compliance_pdf, generate_explainability
+    COMPLIANCE_ENABLED = True
+except ImportError:
+    COMPLIANCE_ENABLED = False
+    print("\u26a0\ufe0f  Phase 5: compliance_report.py not found")
+
+try:
+    from federated_learning import get_federated_network_stats, get_federated_confidence_boost
+    FEDERATED_ENABLED = True
+except ImportError:
+    FEDERATED_ENABLED = False
+    print("\u26a0\ufe0f  Phase 5: federated_learning.py not found")
+
+
+@app.get("/tickets/{ticket_id}/compliance_report")
+def download_compliance_report(ticket_id: str):
+    """Generate and download an audit-ready compliance PDF for a ticket."""
+    if not COMPLIANCE_ENABLED:
+        raise HTTPException(503, "Compliance report module not available")
+    try:
+        pdf_bytes = generate_compliance_pdf(ticket_id)
+        # fpdf2 .output() returns bytearray; StreamingResponse needs bytes
+        if isinstance(pdf_bytes, bytearray):
+            pdf_bytes = bytes(pdf_bytes)
+        return StreamingResponse(
+            iter([pdf_bytes]),
+            media_type="application/pdf",
+            headers={
+                "Content-Disposition": f'attachment; filename="compliance_report_{ticket_id}.pdf"',
+                "Content-Length": str(len(pdf_bytes)),
+            },
+        )
+    except ValueError as e:
+        raise HTTPException(404, str(e))
+    except Exception as e:
+        raise HTTPException(500, f"PDF generation failed: {str(e)[:200]}")
+
+
+@app.get("/tickets/{ticket_id}/explainability")
+def get_explainability(ticket_id: str):
+    """
+    Returns a plain-English explanation of every AI decision made for this ticket.
+    Designed for non-technical auditors and compliance officers.
+    """
+    if not COMPLIANCE_ENABLED:
+        raise HTTPException(503, "Explainability module not available")
+    try:
+        result = generate_explainability(ticket_id)
+        if "error" in result:
+            raise HTTPException(404, result["error"])
+        return result
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, f"Explainability generation failed: {str(e)[:200]}")
+
+
+# ── Federated Learning ────────────────────────────────────────────────────────
+
+@app.get("/federated/stats")
+def federated_stats():
+    """Returns aggregate statistics about the federated learning network."""
+    if not FEDERATED_ENABLED:
+        raise HTTPException(503, "Federated learning module not available")
+    return get_federated_network_stats()
+
+
+@app.get("/federated/signal/{category}")
+def federated_signal(category: str):
+    """Returns cross-org signal for a specific category."""
+    if not FEDERATED_ENABLED:
+        raise HTTPException(503, "Federated learning module not available")
+    return get_federated_confidence_boost(category)
