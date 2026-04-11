@@ -722,8 +722,8 @@ def run_rca(ticket_id: str) -> dict:
             INSERT INTO rca_results
             (id, ticket_id, root_cause, recommended_fix,
              similar_incident_1, similar_incident_2, similar_incident_3,
-             similarity_scores, confidence_score, risk_tier, created_at)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?)
+             similarity_scores, confidence_score, risk_tier, created_at, fix_steps)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
         """, (
             result["id"], result["ticket_id"],
             result["root_cause"], result["recommended_fix"],
@@ -734,6 +734,7 @@ def run_rca(ticket_id: str) -> dict:
             result["confidence_score"],
             result["risk_tier"],
             now,
+            json.dumps(result.get("fix_steps", [])),
         ))
 
         # Update ticket status to pending_approval ONLY if still open

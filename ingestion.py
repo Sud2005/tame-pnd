@@ -243,7 +243,27 @@ def bg_rca(ticket_id):
     if not RCA_ENABLED:
         return
     try:
-        run_rca(ticket_id)
+        from rca_engine import run_rca
+        result = run_rca(ticket_id)
+        if result and result.get("approval_path") == "A":
+            print(f"🚀 Auto-approving {ticket_id} via Path A (Confidence: {result.get('confidence_score')}%)")
+            body = ExecuteRequest(
+                fix_type="auto_remediate",
+                operator_id="system_ai",
+                operator_reason="System AI matched pattern with high confidence (Path A)",
+                approval_path="A",
+                action_type="AUTO_APPROVE",
+                rca_id=result.get("id"),
+                confidence=result.get("confidence_score", 90),
+                risk_tier=result.get("risk_tier", "Low"),
+                actual_fix=result.get("recommended_fix", "")
+            )
+            execute_ticket(ticket_id, body)
+            try:
+                import asyncio
+                asyncio.run(_ws_broadcast({"type": "ticket_resolved", "id": ticket_id}))
+            except Exception as wse:
+                print(f"⚠️ WS broadcast failed in auto-approve: {wse}")
     except Exception as e:
         print(f"⚠️  bg_rca ({ticket_id}): {e}")
 
@@ -452,6 +472,17 @@ def get_rca_result(ticket_id: str):
     conn.close()
     result["similar_incidents"] = similar_incidents
     result["similarity_scores"] = scores
+
+    # Parse fix_steps from DB (stored as JSON string)
+    raw_steps = result.get("fix_steps")
+    if raw_steps and isinstance(raw_steps, str):
+        try:
+            result["fix_steps"] = json.loads(raw_steps)
+        except Exception:
+            result["fix_steps"] = []
+    elif not raw_steps:
+        result["fix_steps"] = []
+
     return result
 
 
@@ -612,12 +643,24 @@ def execute_ticket(ticket_id: str, body: ExecuteRequest):
         WHERE category=?
     """, (now, category))
 
+    # Ensure full fix logic is written to audit reasoning if available
+    final_reasoning = ""
+    rca_row = conn.execute("SELECT fix_steps FROM rca_results WHERE id=?", (body.rca_id,)).fetchone() if body.rca_id else None
+    if rca_row and rca_row["fix_steps"]:
+        try:
+            steps = json.loads(rca_row["fix_steps"])
+            final_reasoning = "STEP_BY_STEP:\n" + "\n".join([f"{i+1}. {s}" for i,s in enumerate(steps)])
+        except:
+            final_reasoning = (body.operator_reason or "")[:1000]
+    else:
+        final_reasoning = (body.operator_reason or "")[:1000]
+
     write_audit(conn, "EXECUTE", ticket_id,
                 operator_id=body.operator_id,
                 approval_path=body.approval_path,
                 confidence=confidence, risk_tier=risk_tier,
                 action_taken=f"Executed {fix_type} via Path {body.approval_path}",
-                reasoning=(body.operator_reason or "")[:200],
+                reasoning=final_reasoning,
                 outcome="success")
 
     # ── Knowledge Delta Capture ────────────────────────────────────────────────

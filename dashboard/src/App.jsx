@@ -849,6 +849,7 @@ function ApprovalWorkflow({ ticket, rca, pred, onComplete }) {
       fix_applied: outcome === "rejected" ? "N/A — fix rejected" :
                    outcome === "rolled_back" ? "Rolled back to pre-execution state" :
                    rca?.recommended_fix || "Manual remediation",
+      fix_steps:   (outcome === "success" && rca?.fix_steps?.length > 0) ? rca.fix_steps : null,
       fix_type:    fixType,
       executed_by: action === "auto" ? "system" : "ops_dashboard",
       timestamp:   new Date().toISOString(),
@@ -939,15 +940,32 @@ function ApprovalWorkflow({ ticket, rca, pred, onComplete }) {
         <div style={{ fontSize: 56 }}>{icon}</div>
         <div style={{ fontSize: 22, fontWeight: 800, color }}>{label}</div>
 
-        <Card style={{ padding: 24, width: "100%", maxWidth: 500, textAlign: "left" }}>
+        <Card style={{ padding: 24, width: "100%", maxWidth: 650, textAlign: "left" }}>
           <div className="mono" style={{ fontSize: 12, display: "flex", flexDirection: "column", gap: 8 }}>
-            {Object.entries(result).map(([k, v]) => (
+            {Object.entries(result).filter(([k]) => k !== "fix_steps").map(([k, v]) => (
               <div key={k} style={{ display: "flex", gap: 12 }}>
                 <span style={{ color: COLORS.textDim, minWidth: 140 }}>{k}</span>
-                <span style={{ color: COLORS.text }}>{String(v)}</span>
+                <span style={{ color: COLORS.text, wordBreak: "break-word" }}>{String(v)}</span>
               </div>
             ))}
           </div>
+          {result.fix_steps && (
+            <div style={{ marginTop: 20, paddingTop: 16, borderTop: `1px solid ${COLORS.border}` }}>
+              <div className="mono" style={{ fontSize: 10, color: COLORS.p3, fontWeight: 700, marginBottom: 12 }}>
+                ✓ EXECUTED FIX STEPS
+              </div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                {result.fix_steps.map((step, i) => (
+                  <div key={i} style={{ display: "flex", gap: 12 }}>
+                    <div style={{ width: 22, height: 22, borderRadius: "50%", background: `${COLORS.p3}22`, color: COLORS.p3, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 11, fontWeight: 800, flexShrink: 0 }}>
+                      {i + 1}
+                    </div>
+                    <div style={{ fontSize: 13, color: COLORS.text, lineHeight: 1.5 }}>{step}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
         </Card>
 
         {isSuccess && (
@@ -1037,32 +1055,44 @@ function ApprovalWorkflow({ ticket, rca, pred, onComplete }) {
           A 10-second cancel window is provided for human oversight.
         </div>
 
-        {/* Recommended fix — highlighted single-line summary */}
-        <div style={{ fontSize: 14, fontWeight: 600, color: COLORS.p3, marginBottom: recFixMarginBottom }}>
-          {rca?.recommended_fix}
-        </div>
-
         {/* Detailed step-by-step fix instructions */}
         {hasFixSteps && (
           <div style={{ textAlign: "left", marginBottom: 24,
-            padding: "14px 16px", background: COLORS.surface,
+            padding: "16px 18px", background: COLORS.surface,
             border: `1px solid ${COLORS.border}`, borderRadius: 8 }}>
-            <div style={{ fontSize: 10, color: COLORS.textDim, letterSpacing: "0.1em",
-              fontWeight: 700, marginBottom: 10, textAlign: "left" }}>
-              STEP-BY-STEP FIX INSTRUCTIONS
+            <div className="mono" style={{ fontSize: 9, color: COLORS.textDim, letterSpacing: "0.12em",
+              fontWeight: 700, marginBottom: 12, textAlign: "left" }}>
+              RECOMMENDED FIX
             </div>
-            {rca.fix_steps.map((step, i) => (
-              <div key={i} style={{ display: "flex", gap: 10, alignItems: "flex-start",
-                marginBottom: i < rca.fix_steps.length - 1 ? 8 : 0 }}>
-                <div style={{
-                  width: 20, height: 20, borderRadius: "50%", flexShrink: 0,
-                  background: COLORS.accent + "20", color: COLORS.accent,
-                  display: "flex", alignItems: "center", justifyContent: "center",
-                  fontSize: 10, fontWeight: 700,
-                }}>{i + 1}</div>
-                <div style={{ fontSize: 12, color: COLORS.textDim, lineHeight: 1.6 }}>{step}</div>
-              </div>
-            ))}
+            <div style={{ fontSize: 14, fontWeight: 800, color: COLORS.p3, lineHeight: 1.5, marginBottom: 14 }}>
+              {rca?.recommended_fix}
+            </div>
+            {rca.fix_steps.map((step, i) => {
+              const stepText = String(step);
+              const prefixMatch = stepText.match(/^(Step\s+\d+[\s:—\-–]+[^:]+?):\s*(.*)/is);
+              const stepPrefix = prefixMatch ? prefixMatch[1].replace(/^Step\s+\d+[\s:—\-–]+/i, '').trim() : null;
+              const stepBody = prefixMatch ? prefixMatch[2].trim() : stepText.replace(/^Step\s+\d+[\s:—\-–]*/i, '').trim();
+              return (
+                <div key={i} style={{ display: "flex", gap: 10, alignItems: "flex-start",
+                  marginBottom: i < rca.fix_steps.length - 1 ? 10 : 0 }}>
+                  <div style={{
+                    minWidth: 22, height: 22, borderRadius: "50%", flexShrink: 0,
+                    background: COLORS.accent + "22", color: COLORS.accent,
+                    display: "flex", alignItems: "center", justifyContent: "center",
+                    fontSize: 10, fontWeight: 800, marginTop: 1,
+                  }}>{i + 1}</div>
+                  <div style={{ fontSize: 12.5, color: COLORS.text, lineHeight: 1.7 }}>
+                    {stepPrefix && (
+                      <span style={{ fontWeight: 700, color: COLORS.text }}>Step {i+1}: {stepPrefix}: </span>
+                    )}
+                    {!stepPrefix && (
+                      <span style={{ fontWeight: 700, color: COLORS.text }}>Step {i+1}: </span>
+                    )}
+                    <span style={{ color: COLORS.textDim }}>{stepBody}</span>
+                  </div>
+                </div>
+              );
+            })}
           </div>
         )}
 
@@ -1390,9 +1420,35 @@ function AuditTrail() {
                   <td style={{ padding: "8px 10px" }}>
                     {e.risk_tier && <Badge label={e.risk_tier} color={RISK_COLOR[e.risk_tier] || COLORS.textDim} />}
                   </td>
-                  <td style={{ padding: "8px 10px", maxWidth: 200, overflow: "hidden",
-                    textOverflow: "ellipsis", whiteSpace: "nowrap", color: COLORS.text, fontSize: 11 }}>
-                    {e.action_taken || e.reasoning?.slice(0,60) || "–"}
+                  <td style={{ padding: "8px 10px", maxWidth: 280, color: COLORS.text, fontSize: 11 }}>
+                    {e.reasoning?.startsWith("STEP_BY_STEP:\n") ? (
+                      <div style={{ maxHeight: 160, overflowY: "auto", background: COLORS.surface, padding: "10px 12px", borderRadius: 6, border: `1px solid ${COLORS.accent}22` }}>
+                        <div style={{ color: COLORS.accent, fontSize: 9, fontWeight: 700, marginBottom: 8, letterSpacing: "0.05em" }}>✓ AUTO-EXECUTED SOLUTION</div>
+                        {e.reasoning.replace("STEP_BY_STEP:\n", "").split("\n").filter(l => l.trim()).map((line, idx) => {
+                          const numMatch = line.match(/^(\d+)\.\s*(.*)/);
+                          const stepNum = numMatch ? numMatch[1] : String(idx + 1);
+                          const stepContent = numMatch ? numMatch[2] : line;
+                          return (
+                            <div key={idx} style={{ display: "flex", gap: 8, alignItems: "flex-start", marginBottom: 6 }}>
+                              <div style={{
+                                minWidth: 18, height: 18, borderRadius: "50%",
+                                background: `${COLORS.accent}22`, color: COLORS.accent,
+                                display: "flex", alignItems: "center", justifyContent: "center",
+                                fontSize: 9, fontWeight: 800, flexShrink: 0, marginTop: 1,
+                              }}>{stepNum}</div>
+                              <div style={{ fontSize: 11, lineHeight: 1.5, color: COLORS.textDim }}>
+                                <span style={{ fontWeight: 700, color: COLORS.text }}>Step {stepNum}: </span>
+                                {stepContent}
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    ) : (
+                      <div style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                        {e.action_taken || e.reasoning?.slice(0, 80) || "–"}
+                      </div>
+                    )}
                   </td>
                   <td style={{ padding: "8px 10px" }}>
                     {e.outcome && (
@@ -1794,17 +1850,61 @@ function SolutionModal({ ticket, onClose }) {
 
         {loading && <div style={{ textAlign:"center", padding:20 }}><Spinner /></div>}
 
-        {/* Recommended Fix — hero section */}
-        {recFix && (
-          <div style={{ marginBottom:14, padding:"14px 16px",
-            background:`linear-gradient(135deg, ${COLORS.p3}12 0%, ${COLORS.p3}06 100%)`,
-            border:`1px solid ${COLORS.p3}44`, borderRadius:8 }}>
-            <div className="mono" style={{ fontSize:9, color:COLORS.p3, letterSpacing:"0.1em", marginBottom:6, fontWeight:700 }}>
-              💡 RECOMMENDED ACTION
+        {/* Recommended Fix + Step-by-Step Resolution (unified block matching screenshot) */}
+        {(recFix || fixSteps.length > 0) && (
+          <div style={{ marginBottom:14, padding:"16px 18px",
+            background:`linear-gradient(135deg, ${COLORS.surface} 0%, ${COLORS.card} 100%)`,
+            border:`1px solid ${COLORS.border}`, borderRadius:8 }}>
+
+            {/* RECOMMENDED FIX label */}
+            <div className="mono" style={{ fontSize:9, color:COLORS.textDim, letterSpacing:"0.12em", marginBottom:8, fontWeight:700 }}>
+              RECOMMENDED FIX
             </div>
-            <div style={{ fontSize:14, fontWeight:800, color:COLORS.p3, lineHeight:1.5 }}>
-              {recFix}
-            </div>
+
+            {/* Green bold fix summary */}
+            {recFix && (
+              <div style={{ fontSize:14, fontWeight:800, color:COLORS.p3, lineHeight:1.5, marginBottom: fixSteps.length > 0 ? 16 : 0 }}>
+                {recFix}
+              </div>
+            )}
+
+            {/* Numbered step-by-step instructions */}
+            {fixSteps.length > 0 && (
+              <div style={{ display:"flex", flexDirection:"column", gap:10 }}>
+                {fixSteps.map((step, i) => {
+                  // Parse "Step N — Title: Description" or "Step N: Description" pattern
+                  const stepText = String(step);
+                  const prefixMatch = stepText.match(/^(Step\s+\d+[\s:—\-–]+[^:]+?):\s*(.*)/is);
+                  const stepPrefix = prefixMatch ? prefixMatch[1].replace(/^Step\s+\d+[\s:—\-–]+/i, '').trim() : null;
+                  const stepBody = prefixMatch ? prefixMatch[2].trim() : stepText.replace(/^Step\s+\d+[\s:—\-–]*/i, '').trim();
+
+                  return (
+                    <div key={i} style={{ display:"flex", gap:12, alignItems:"flex-start" }}>
+                      {/* Numbered circle */}
+                      <div style={{
+                        minWidth:24, height:24, borderRadius:"50%",
+                        background:`${COLORS.accent}22`, color:COLORS.accent,
+                        display:"flex", alignItems:"center", justifyContent:"center",
+                        fontSize:11, fontWeight:800, fontFamily:"JetBrains Mono, monospace", flexShrink:0,
+                        marginTop:1,
+                      }}>
+                        {i+1}
+                      </div>
+                      {/* Step content */}
+                      <div style={{ fontSize:12.5, color:COLORS.text, lineHeight:1.7 }}>
+                        {stepPrefix && (
+                          <span style={{ fontWeight:700, color:COLORS.text }}>Step {i+1}: {stepPrefix}: </span>
+                        )}
+                        {!stepPrefix && (
+                          <span style={{ fontWeight:700, color:COLORS.text }}>Step {i+1}: </span>
+                        )}
+                        <span style={{ color:COLORS.textDim }}>{stepBody}</span>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
           </div>
         )}
 
@@ -1818,31 +1918,6 @@ function SolutionModal({ ticket, onClose }) {
               border:`1px solid ${COLORS.accent}33`, borderLeft:`3px solid ${COLORS.accent}`,
               borderRadius:"0 6px 6px 0", fontSize:13, color:COLORS.text, lineHeight:1.7 }}>
               {rootCause}
-            </div>
-          </div>
-        )}
-
-        {/* Fix Steps */}
-        {fixSteps.length > 0 && (
-          <div style={{ marginBottom:14 }}>
-            <div className="mono" style={{ fontSize:9, color:COLORS.accent, letterSpacing:"0.1em", marginBottom:8, fontWeight:700 }}>
-              STEP-BY-STEP RESOLUTION GUIDE
-            </div>
-            <div style={{ padding:"12px 14px", background:COLORS.accent+"08", border:`1px solid ${COLORS.accent}22`,
-              borderRadius:6 }}>
-              {fixSteps.map((step, i) => (
-                <div key={i} style={{ display:"flex", gap:12, marginBottom:i < fixSteps.length-1 ? 10 : 0,
-                  paddingBottom:i < fixSteps.length-1 ? 10 : 0,
-                  borderBottom:i < fixSteps.length-1 ? `1px solid ${COLORS.border}44` : "none" }}>
-                  <div style={{ minWidth:24, height:24, borderRadius:"50%",
-                    background:`${COLORS.accent}20`, color:COLORS.accent,
-                    display:"flex", alignItems:"center", justifyContent:"center",
-                    fontSize:10, fontWeight:800, fontFamily:"JetBrains Mono, monospace", flexShrink:0 }}>
-                    {i+1}
-                  </div>
-                  <div style={{ fontSize:12, color:COLORS.text, lineHeight:1.65 }}>{step}</div>
-                </div>
-              ))}
             </div>
           </div>
         )}
