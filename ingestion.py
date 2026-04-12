@@ -30,12 +30,13 @@ _MAX_REASON_LEN = 500   # max length for operator reason / rollback reason strin
 DEMO_SCALE = 242        # Used to artificially inflate summary counts for hackathon demo video
 _schema_extensions_ready = False
 
-DEFAULT_ROUTING_FALLBACK = "L1_Support_Queue"
+DEFAULT_FALLBACK_QUEUE = "L1_Support_Queue"
 DEFAULT_SUMMARY_TRIGGERS = {
     "on_ingest": True,
     "on_update": True,
     "on_open": True,
 }
+GROQ_TEXT_MODEL = "llama-3.3-70b-versatile"
 
 # ── WebSocket connection registry ─────────────────────────────────────────────
 _ws_connections: set = set()
@@ -123,7 +124,7 @@ def ensure_schema_extensions(conn):
     ]
     for col, col_type in ticket_column_migrations:
         if col not in cols:
-            conn.execute(f"ALTER TABLE tickets ADD COLUMN {col} {col_type}")
+            conn.execute("ALTER TABLE tickets ADD COLUMN " + col + " " + col_type)
 
     conn.execute("""
         CREATE TABLE IF NOT EXISTS routing_rules (
@@ -170,7 +171,7 @@ def ensure_schema_extensions(conn):
     conn.execute("""
         INSERT OR IGNORE INTO routing_config(key, value)
         VALUES ('fallback_queue', ?)
-    """, (DEFAULT_ROUTING_FALLBACK,))
+    """, (DEFAULT_FALLBACK_QUEUE,))
     conn.execute("""
         INSERT OR IGNORE INTO feature_config(key, value)
         VALUES ('summary_triggers', ?)
@@ -200,13 +201,13 @@ def ensure_schema_extensions(conn):
     conn.commit()
 
 
-def _csv_tokens(val: str) -> list[str]:
+def _csv_tokens(val: str) -> List[str]:
     if not val:
         return []
     return [t.strip().lower() for t in val.split(",") if t.strip()]
 
 
-def _json_list(value) -> list[str]:
+def _json_list(value) -> List[str]:
     if isinstance(value, list):
         return [str(v).strip() for v in value if str(v).strip()]
     if isinstance(value, str) and value.strip():
@@ -237,7 +238,7 @@ def _is_summary_trigger_enabled(conn, event_name: str) -> bool:
 
 def _get_fallback_queue(conn) -> str:
     row = conn.execute("SELECT value FROM routing_config WHERE key='fallback_queue'").fetchone()
-    return (row["value"] if row and row["value"] else DEFAULT_ROUTING_FALLBACK)
+    return (row["value"] if row and row["value"] else DEFAULT_FALLBACK_QUEUE)
 
 
 def _compute_sla_targets(opened_at: str, severity: str):
@@ -262,7 +263,7 @@ def _match_rule_tokens(rule_value: str, candidate: str) -> bool:
     return any(tok in c for tok in tokens)
 
 
-def route_ticket_to_queue(conn, *, description: str, category: str, severity: str, affected_service: str, ci_ids: list[str]):
+def route_ticket_to_queue(conn, *, description: str, category: str, severity: str, affected_service: str, ci_ids: List[str]):
     rows = conn.execute("""
         SELECT * FROM routing_rules
         WHERE enabled=1
@@ -271,7 +272,7 @@ def route_ticket_to_queue(conn, *, description: str, category: str, severity: st
     desc = (description or "").lower()
     cat = (category or "").lower()
     sev = (severity or "").upper()
-    ci_lower = {c.lower() for c in ci_ids}
+    ci_lower_set = {c.lower() for c in ci_ids}
     for row in rows:
         rule = dict(row)
         if rule.get("category_match"):
@@ -286,7 +287,7 @@ def route_ticket_to_queue(conn, *, description: str, category: str, severity: st
             continue
         if rule.get("ci_match"):
             required_ci = set(_csv_tokens(rule["ci_match"]))
-            if required_ci and not (required_ci & ci_lower):
+            if required_ci and not (required_ci & ci_lower_set):
                 continue
         if rule.get("keyword_match"):
             if not any(tok in desc for tok in _csv_tokens(rule["keyword_match"])):
@@ -457,7 +458,7 @@ def _generate_incident_summary(conn, ticket_id: str, trigger_event: str = "open"
             client = get_prediction_groq()
             payload = json.dumps(summary, ensure_ascii=False)
             rsp = client.chat.completions.create(
-                model="llama-3.3-70b-versatile",
+                model=GROQ_TEXT_MODEL,
                 temperature=0.1,
                 max_tokens=500,
                 messages=[
@@ -470,7 +471,7 @@ def _generate_incident_summary(conn, ticket_id: str, trigger_event: str = "open"
         except Exception:
             pass
 
-    context_hash = hashlib.sha1(json.dumps({
+    context_hash = hashlib.sha256(json.dumps({
         "status": ticket.get("status"),
         "resolution_notes": ticket.get("resolution_notes"),
         "assigned_group": ticket.get("assigned_group"),
@@ -548,8 +549,14 @@ class TicketIngest(BaseModel):
 
 
 class TicketResponse(BaseModel):
-    id: str; description: str; severity: str; category: str
-    status: str; opened_at: str; anomaly_flags: list[str]; message: str
+    id: str
+    description: str
+    severity: str
+    category: str
+    status: str
+    opened_at: str
+    anomaly_flags: List[str]
+    message: str
 
 
 class ResolveRequest(BaseModel):
@@ -1599,7 +1606,7 @@ Keep replies under 120 words."""
 
     try:
         response = client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
+            model=GROQ_TEXT_MODEL,
             messages=messages,
             temperature=0.4,
             max_tokens=180,   # keep responses short for voice readback
@@ -1799,7 +1806,7 @@ def compose_suggestions(ticket_id: str, body: dict):
                 "audience": audience,
             }, ensure_ascii=False)
             rsp = client.chat.completions.create(
-                model="llama-3.3-70b-versatile",
+                model=GROQ_TEXT_MODEL,
                 temperature=0.2,
                 max_tokens=220,
                 messages=[

@@ -533,7 +533,7 @@ async function submitTicket() {
         urgency:        urgency,
         impact:         urgency,
         source:         'client_portal',
-        caller_name:    name || 'CLIENT-USER',
+        caller_name:    name || 'Unknown Caller',
         caller_contact: contact || '',
         affected_service: system || '',
         ci_ids:         system ? [system] : [],
