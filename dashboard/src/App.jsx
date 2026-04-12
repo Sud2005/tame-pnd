@@ -936,7 +936,7 @@ function ApprovalWorkflow({ ticket, rca, pred, onComplete }) {
     return (
       <div className="fade-in" style={{ height: "100%", display: "flex",
         flexDirection: "column", alignItems: "center", justifyContent: "center",
-        padding: 40, gap: 20, textAlign: "center" }}>
+        padding: 40, gap: 20, textAlign: "center", overflowY: "auto" }}>
         <div style={{ fontSize: 56 }}>{icon}</div>
         <div style={{ fontSize: 22, fontWeight: 800, color }}>{label}</div>
 
@@ -1047,7 +1047,7 @@ function ApprovalWorkflow({ ticket, rca, pred, onComplete }) {
     const recFixMarginBottom = hasFixSteps ? 16 : 24;
     return (
     <div style={{ height: "100%", display: "flex", flexDirection: "column",
-      alignItems: "center", justifyContent: "center", padding: 40, gap: 20 }}>
+      alignItems: "center", justifyContent: "center", padding: 40, gap: 20, overflowY: "auto" }}>
       <PathHeader path="A" risk={risk} conf={conf} riskColor={riskColor} />
       <Card style={{ padding: 32, width: "100%", maxWidth: 560, textAlign: "center" }}>
         <div style={{ fontSize: 13, color: COLORS.textDim, marginBottom: 20 }}>
@@ -1130,7 +1130,7 @@ function ApprovalWorkflow({ ticket, rca, pred, onComplete }) {
   // ── Path B: Single approval ───────────────────────────────────────────────────
   if (path === "B") return (
     <div style={{ height: "100%", display: "flex", flexDirection: "column",
-      alignItems: "center", justifyContent: "center", padding: 40, gap: 20 }}>
+      alignItems: "center", justifyContent: "center", padding: 40, gap: 20, overflowY: "auto" }}>
       <PathHeader path="B" risk={risk} conf={conf} riskColor={riskColor} />
       <Card style={{ padding: 28, width: "100%", maxWidth: 520 }}>
         <div style={{ fontSize: 14, fontWeight: 600, color: COLORS.text, marginBottom: 8 }}>
@@ -1211,7 +1211,7 @@ function ApprovalWorkflow({ ticket, rca, pred, onComplete }) {
   // ── Path C: Mandatory review ──────────────────────────────────────────────────
   return (
     <div style={{ height: "100%", display: "flex", flexDirection: "column",
-      alignItems: "center", justifyContent: "center", padding: 40, gap: 20 }}>
+      alignItems: "center", justifyContent: "center", padding: 40, gap: 20, overflowY: "auto" }}>
       <PathHeader path="C" risk={risk} conf={conf} riskColor={riskColor} />
       <Card style={{ padding: 28, width: "100%", maxWidth: 560 }}>
         <div style={{ padding: "12px 16px", background: COLORS.p1 + "15",
