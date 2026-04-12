@@ -274,10 +274,24 @@
   .meta { font-family: monospace; font-size: 10px; color: var(--dim); margin-top: 4px; }
   .empty { text-align: center; padding: 40px; color: var(--dim); font-size: 13px; }
 
+  .detail-tabs { display:flex; gap:8px; margin-bottom:12px; flex-wrap:wrap; }
+  .detail-tab-btn {
+    padding: 7px 12px; border-radius: 6px; border:1px solid var(--border);
+    background: var(--surface); color: var(--dim); cursor:pointer;
+    font-size: 11px; font-weight:700; font-family:inherit;
+  }
+  .detail-tab-btn.active { color: var(--accent); border-color: var(--accent); background: rgba(0,212,255,.08); }
+  .detail-tab-panel { border:1px solid var(--border); border-radius:8px; padding:12px; background:var(--surface); }
+  .record-grid { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+  .compose-row { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+  .compose-box textarea { min-height: 90px; font-size:12px; }
+  .compose-box .label { margin-bottom:4px; }
+
   @media (max-width: 640px) {
     .main { padding: 16px; }
     .voice-panel { width: calc(100vw - 32px); right: 16px; bottom: 16px; }
     .grid-2 { grid-template-columns: 1fr; }
+    .record-grid, .compose-row { grid-template-columns:1fr; }
   }
 </style>
 </head>
@@ -519,7 +533,10 @@ async function submitTicket() {
         urgency:        urgency,
         impact:         urgency,
         source:         'client_portal',
-        assigned_group: name || 'CLIENT-USER',
+        caller_name:    name || 'CLIENT-USER',
+        caller_contact: contact || '',
+        affected_service: system || '',
+        ci_ids:         system ? [system] : [],
       }),
     });
     const data = await res.json();
@@ -724,7 +741,35 @@ async function openTicketDetail(ticket) {
             ✕ You cancelled this ticket
           </div>` : ''}
       </div>
+
+      <div class="divider"></div>
+      <div>
+        <div class="label" style="margin-bottom:10px">INCIDENT WORKSPACE</div>
+        <div class="detail-tabs">
+          <button id="detail-tab-btn-summary" class="detail-tab-btn active" onclick="switchDetailTab('summary','${ticket.id}')">Incident Summary</button>
+          <button id="detail-tab-btn-compose" class="detail-tab-btn" onclick="switchDetailTab('compose','${ticket.id}')">Compose</button>
+          <button id="detail-tab-btn-record" class="detail-tab-btn" onclick="switchDetailTab('record','${ticket.id}')">Record Information</button>
+        </div>
+        <div id="detail-tab-summary" class="detail-tab-panel">Loading summary...</div>
+        <div id="detail-tab-compose" class="detail-tab-panel" style="display:none">
+          <div class="compose-row">
+            <div class="compose-box">
+              <div class="label">CUSTOMER-VISIBLE COMMENT</div>
+              <textarea id="compose-customer" placeholder="Generate or edit customer update..."></textarea>
+              <button class="btn btn-ghost" style="font-size:11px;margin-top:8px" onclick="generateComposeDraft('${ticket.id}','customer')">✨ Draft Customer Comment</button>
+            </div>
+            <div class="compose-box">
+              <div class="label">INTERNAL WORK NOTE</div>
+              <textarea id="compose-internal" placeholder="Generate or edit internal work note..."></textarea>
+              <button class="btn btn-ghost" style="font-size:11px;margin-top:8px" onclick="generateComposeDraft('${ticket.id}','internal')">🛠 Draft Internal Note</button>
+            </div>
+          </div>
+        </div>
+        <div id="detail-tab-record" class="detail-tab-panel" style="display:none">Loading record information...</div>
+      </div>
     </div>`;
+
+  switchDetailTab('summary', ticket.id);
 }
 
 function buildTimeline(ticket, rca) {
@@ -758,6 +803,116 @@ function buildTimeline(ticket, rca) {
         <div class="meta">${s.detail}</div>
       </div>
     </div>`).join('')}</div>`;
+}
+
+async function switchDetailTab(tab, ticketId) {
+  ['summary','compose','record'].forEach(t => {
+    const panel = document.getElementById('detail-tab-' + t);
+    const btn = document.getElementById('detail-tab-btn-' + t);
+    if (panel) panel.style.display = t === tab ? 'block' : 'none';
+    if (btn) btn.classList.toggle('active', t === tab);
+  });
+  if (tab === 'summary') await loadIncidentSummary(ticketId);
+  if (tab === 'record') await loadRecordInformation(ticketId);
+}
+
+async function loadIncidentSummary(ticketId) {
+  const el = document.getElementById('detail-tab-summary');
+  if (!el) return;
+  el.innerHTML = '<div class="meta">Generating structured summary...</div>';
+  try {
+    const res = await fetch(API + `/tickets/${ticketId}/incident_summary`);
+    const data = await res.json();
+    const s = data.summary || {};
+    const actions = (s.key_actions_taken || []).slice(-5);
+    el.innerHTML = `
+      <div style="font-size:12px;line-height:1.6;margin-bottom:10px">${s.issue_description || 'No description available.'}</div>
+      <div class="record-grid">
+        <div>
+          <div class="label">RESOLUTION STATUS</div>
+          <div style="font-size:12px">${(s.resolution_status?.status || 'open').replace('_',' ').toUpperCase()}</div>
+          <div class="meta">${s.resolution_status?.notes || 'No resolution notes yet.'}</div>
+        </div>
+        <div>
+          <div class="label">SLA BREACH</div>
+          <div style="font-size:12px;color:${s.sla_breach_information?.breach_status ? 'var(--p1)' : 'var(--p3)'}">
+            ${s.sla_breach_information?.breach_status ? 'BREACH RISK / BREACHED' : 'ON TRACK'}
+          </div>
+          <div class="meta">Response: ${s.sla_breach_information?.response_state || 'n/a'} · Resolution: ${s.sla_breach_information?.resolution_state || 'n/a'}</div>
+        </div>
+      </div>
+      <div style="margin-top:10px">
+        <div class="label">AFFECTED SERVICE / CIS</div>
+        <div style="font-size:12px">${s.affected_services_and_cis?.affected_service || 'Unspecified'}</div>
+        <div class="meta">${(s.affected_services_and_cis?.cis || []).join(', ') || 'No CI linked'}</div>
+      </div>
+      <div style="margin-top:10px">
+        <div class="label">RECENT KEY ACTIONS</div>
+        ${actions.length ? actions.map(a => `<div class="meta">• ${a.timestamp || ''} · ${a.event || ''} · ${a.action || ''}</div>`).join('') : '<div class="meta">No actions logged yet.</div>'}
+      </div>
+    `;
+  } catch (e) {
+    el.innerHTML = `<div class="meta">Failed to load summary: ${e.message}</div>`;
+  }
+}
+
+async function loadRecordInformation(ticketId) {
+  const el = document.getElementById('detail-tab-record');
+  if (!el) return;
+  el.innerHTML = '<div class="meta">Loading metadata...</div>';
+  try {
+    const res = await fetch(API + `/tickets/${ticketId}/record_information`);
+    const data = await res.json();
+    el.innerHTML = `
+      <div class="record-grid">
+        <div>
+          <div class="label">CALLER</div>
+          <div style="font-size:12px">${data.caller_details?.name || 'Unknown'}</div>
+          <div class="meta">${data.caller_details?.contact || 'Unknown'}</div>
+        </div>
+        <div>
+          <div class="label">ASSIGNMENT</div>
+          <div style="font-size:12px">${data.assignment?.queue || 'Unassigned queue'}</div>
+          <div class="meta">Agent: ${data.assignment?.agent || 'Unassigned'}</div>
+        </div>
+        <div>
+          <div class="label">SERVICE / ASSETS</div>
+          <div style="font-size:12px">${data.service_context?.affected_service || 'Unspecified'}</div>
+          <div class="meta">CIs: ${(data.service_context?.linked_cis || []).join(', ') || 'None'}</div>
+        </div>
+        <div>
+          <div class="label">LINKED RECORDS</div>
+          <div style="font-size:12px">Parent: ${data.service_context?.parent_ticket_id || '—'}</div>
+          <div class="meta">Related: ${(data.service_context?.related_records || []).join(', ') || 'None'}</div>
+        </div>
+      </div>
+      <div style="margin-top:10px">
+        <div class="label">SLA STATE</div>
+        <div class="meta">Response target: ${data.sla?.response_target_at || 'n/a'} · state: ${data.sla?.response_state || 'n/a'}</div>
+        <div class="meta">Resolution target: ${data.sla?.resolution_target_at || 'n/a'} · state: ${data.sla?.resolution_state || 'n/a'}</div>
+      </div>
+    `;
+  } catch (e) {
+    el.innerHTML = `<div class="meta">Failed to load record information: ${e.message}</div>`;
+  }
+}
+
+async function generateComposeDraft(ticketId, audience) {
+  const targetId = audience === 'customer' ? 'compose-customer' : 'compose-internal';
+  const el = document.getElementById(targetId);
+  if (!el) return;
+  el.value = 'Generating draft...';
+  try {
+    const res = await fetch(API + `/tickets/${ticketId}/compose/suggestions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ audience, intent: 'status_update' }),
+    });
+    const data = await res.json();
+    el.value = data.draft || '';
+  } catch (e) {
+    el.value = `Failed to generate draft: ${e.message}`;
+  }
 }
 
 function buildSolution(rca) {

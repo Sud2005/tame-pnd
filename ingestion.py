@@ -13,9 +13,11 @@ Run: uvicorn ingestion:app --reload --port 8000
 """
 
 import json
+import hashlib
+import os
 import sqlite3
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional, List
 
 from fastapi import FastAPI, HTTPException, BackgroundTasks, WebSocket, WebSocketDisconnect
@@ -26,6 +28,14 @@ from pydantic import BaseModel, Field
 DB_PATH = "db/opsai.db"
 _MAX_REASON_LEN = 500   # max length for operator reason / rollback reason strings stored in DB
 DEMO_SCALE = 242        # Used to artificially inflate summary counts for hackathon demo video
+_schema_extensions_ready = False
+
+DEFAULT_ROUTING_FALLBACK = "L1_Support_Queue"
+DEFAULT_SUMMARY_TRIGGERS = {
+    "on_ingest": True,
+    "on_update": True,
+    "on_open": True,
+}
 
 # ── WebSocket connection registry ─────────────────────────────────────────────
 _ws_connections: set = set()
@@ -43,11 +53,12 @@ async def _ws_broadcast(message: dict):
 
 
 try:
-    from prediction import predict_ticket
+    from prediction import predict_ticket, get_groq as get_prediction_groq
     PREDICTION_ENABLED = True
     print("✅ Phase 2: Prediction engine loaded")
 except ImportError:
     PREDICTION_ENABLED = False
+    get_prediction_groq = None
     print("⚠️  Phase 2: prediction.py not found")
 
 try:
@@ -87,9 +98,414 @@ async def startup_event():
 
 
 def get_db():
+    global _schema_extensions_ready
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
+    if not _schema_extensions_ready:
+        ensure_schema_extensions(conn)
+        _schema_extensions_ready = True
     return conn
+
+
+def ensure_schema_extensions(conn):
+    cols = {row["name"] for row in conn.execute("PRAGMA table_info(tickets)").fetchall()}
+    ticket_column_migrations = [
+        ("affected_service", "TEXT"),
+        ("ci_ids", "TEXT"),
+        ("caller_name", "TEXT"),
+        ("caller_contact", "TEXT"),
+        ("assigned_agent", "TEXT"),
+        ("parent_ticket_id", "TEXT"),
+        ("related_ticket_ids", "TEXT"),
+        ("response_sla_target_at", "TEXT"),
+        ("resolution_sla_target_at", "TEXT"),
+        ("first_response_at", "TEXT"),
+    ]
+    for col, col_type in ticket_column_migrations:
+        if col not in cols:
+            conn.execute(f"ALTER TABLE tickets ADD COLUMN {col} {col_type}")
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS routing_rules (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL,
+            enabled INTEGER DEFAULT 1,
+            priority INTEGER DEFAULT 100,
+            category_match TEXT,
+            service_match TEXT,
+            severity_match TEXT,
+            ci_match TEXT,
+            keyword_match TEXT,
+            queue TEXT NOT NULL,
+            created_at TEXT DEFAULT (datetime('now')),
+            updated_at TEXT DEFAULT (datetime('now'))
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS routing_config (
+            key TEXT PRIMARY KEY,
+            value TEXT
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS feature_config (
+            key TEXT PRIMARY KEY,
+            value TEXT
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS incident_summaries (
+            id TEXT PRIMARY KEY,
+            ticket_id TEXT UNIQUE NOT NULL,
+            summary_json TEXT NOT NULL,
+            context_hash TEXT,
+            trigger_event TEXT,
+            generated_at TEXT DEFAULT (datetime('now')),
+            FOREIGN KEY (ticket_id) REFERENCES tickets(id)
+        )
+    """)
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_routing_rules_enabled ON routing_rules(enabled, priority)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_incident_summaries_ticket ON incident_summaries(ticket_id)")
+
+    conn.execute("""
+        INSERT OR IGNORE INTO routing_config(key, value)
+        VALUES ('fallback_queue', ?)
+    """, (DEFAULT_ROUTING_FALLBACK,))
+    conn.execute("""
+        INSERT OR IGNORE INTO feature_config(key, value)
+        VALUES ('summary_triggers', ?)
+    """, (json.dumps(DEFAULT_SUMMARY_TRIGGERS),))
+    conn.execute("""
+        INSERT OR IGNORE INTO feature_config(key, value)
+        VALUES ('summary_ai_enabled', '1')
+    """)
+
+    rules_count = conn.execute("SELECT COUNT(*) FROM routing_rules").fetchone()[0]
+    if rules_count == 0:
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        default_rules = [
+            ("network-domain", "Network Domain Routing", 1, 10, "Network", "vpn,dns,firewall,network", "P1,P2,P3", "network,router,vpn,dns,firewall,switch", "Network_Ops"),
+            ("app-domain", "Application Domain Routing", 1, 20, "Application,Authentication", "portal,api,application,app,sso", "P1,P2,P3", "application,api,login,auth,sso,token", "App_Support"),
+            ("db-domain", "Database Domain Routing", 1, 30, "Database", "db,database,oracle,sql,postgres", "P1,P2,P3", "database,db,sql,replication,storage", "Database_Team"),
+            ("infra-domain", "Infrastructure Domain Routing", 1, 40, "Infrastructure", "server,compute,disk,memory,container", "P1,P2,P3", "server,cpu,memory,disk,container", "Infra_Ops"),
+            ("security-domain", "Security Domain Routing", 1, 50, "General,Authentication,Network,Application,Database,Infrastructure", "security", "P1,P2,P3", "breach,malware,ransomware,exploit,unauthorized", "Security_Ops"),
+        ]
+        for rid, name, enabled, priority, category_match, service_match, severity_match, keyword_match, queue in default_rules:
+            conn.execute("""
+                INSERT OR IGNORE INTO routing_rules
+                (id, name, enabled, priority, category_match, service_match, severity_match, keyword_match, queue, created_at, updated_at)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?)
+            """, (rid, name, enabled, priority, category_match, service_match, severity_match, keyword_match, queue, now, now))
+
+    conn.commit()
+
+
+def _csv_tokens(val: str) -> list[str]:
+    if not val:
+        return []
+    return [t.strip().lower() for t in val.split(",") if t.strip()]
+
+
+def _json_list(value) -> list[str]:
+    if isinstance(value, list):
+        return [str(v).strip() for v in value if str(v).strip()]
+    if isinstance(value, str) and value.strip():
+        try:
+            parsed = json.loads(value)
+            if isinstance(parsed, list):
+                return [str(v).strip() for v in parsed if str(v).strip()]
+        except Exception:
+            return _csv_tokens(value)
+    return []
+
+
+def _get_feature_config(conn, key: str, default=None):
+    row = conn.execute("SELECT value FROM feature_config WHERE key=?", (key,)).fetchone()
+    if not row:
+        return default
+    return row["value"]
+
+
+def _is_summary_trigger_enabled(conn, event_name: str) -> bool:
+    raw = _get_feature_config(conn, "summary_triggers", json.dumps(DEFAULT_SUMMARY_TRIGGERS))
+    try:
+        cfg = json.loads(raw or "{}")
+    except Exception:
+        cfg = DEFAULT_SUMMARY_TRIGGERS
+    return bool(cfg.get(f"on_{event_name}", False))
+
+
+def _get_fallback_queue(conn) -> str:
+    row = conn.execute("SELECT value FROM routing_config WHERE key='fallback_queue'").fetchone()
+    return (row["value"] if row and row["value"] else DEFAULT_ROUTING_FALLBACK)
+
+
+def _compute_sla_targets(opened_at: str, severity: str):
+    try:
+        opened_dt = datetime.strptime(opened_at, "%Y-%m-%d %H:%M:%S")
+    except Exception:
+        opened_dt = datetime.now()
+    sev = (severity or "P3").upper()
+    response_hrs = 0.5 if sev == "P1" else 2 if sev == "P2" else 8
+    resolve_hrs = 4 if sev == "P1" else 8 if sev == "P2" else 24
+    return (
+        (opened_dt + timedelta(hours=response_hrs)).strftime("%Y-%m-%d %H:%M:%S"),
+        (opened_dt + timedelta(hours=resolve_hrs)).strftime("%Y-%m-%d %H:%M:%S"),
+    )
+
+
+def _match_rule_tokens(rule_value: str, candidate: str) -> bool:
+    tokens = _csv_tokens(rule_value)
+    if not tokens:
+        return True
+    c = (candidate or "").lower()
+    return any(tok in c for tok in tokens)
+
+
+def route_ticket_to_queue(conn, *, description: str, category: str, severity: str, affected_service: str, ci_ids: list[str]):
+    rows = conn.execute("""
+        SELECT * FROM routing_rules
+        WHERE enabled=1
+        ORDER BY priority ASC, updated_at DESC
+    """).fetchall()
+    desc = (description or "").lower()
+    cat = (category or "").lower()
+    sev = (severity or "").upper()
+    ci_lower = {c.lower() for c in ci_ids}
+    for row in rows:
+        rule = dict(row)
+        if rule.get("category_match"):
+            category_tokens = _csv_tokens(rule["category_match"])
+            if category_tokens and cat not in category_tokens:
+                continue
+        if rule.get("severity_match"):
+            severity_tokens = [t.upper() for t in _csv_tokens(rule["severity_match"])]
+            if severity_tokens and sev not in severity_tokens:
+                continue
+        if rule.get("service_match") and not _match_rule_tokens(rule["service_match"], affected_service or ""):
+            continue
+        if rule.get("ci_match"):
+            required_ci = set(_csv_tokens(rule["ci_match"]))
+            if required_ci and not (required_ci & ci_lower):
+                continue
+        if rule.get("keyword_match"):
+            if not any(tok in desc for tok in _csv_tokens(rule["keyword_match"])):
+                continue
+        return rule.get("queue") or _get_fallback_queue(conn), rule
+    return _get_fallback_queue(conn), None
+
+
+def auto_route_existing_ticket(conn, ticket_id: str):
+    row = conn.execute("SELECT * FROM tickets WHERE id=?", (ticket_id,)).fetchone()
+    if not row:
+        return None
+    ticket = dict(row)
+    queue, rule = route_ticket_to_queue(
+        conn,
+        description=ticket.get("description", ""),
+        category=ticket.get("category", ""),
+        severity=ticket.get("severity", ""),
+        affected_service=ticket.get("affected_service", ""),
+        ci_ids=_json_list(ticket.get("ci_ids")),
+    )
+    if queue and queue != (ticket.get("assigned_group") or ""):
+        conn.execute("UPDATE tickets SET assigned_group=? WHERE id=?", (queue, ticket_id))
+        write_audit(conn, "ROUTE", ticket_id,
+                    operator_id="routing_engine",
+                    action_taken=f"assigned_queue={queue}",
+                    reasoning=f"rule={(rule or {}).get('id', 'fallback')} on_update",
+                    outcome="rerouted")
+    return queue
+
+
+def _parse_dt(ts: Optional[str]):
+    if not ts:
+        return None
+    try:
+        return datetime.strptime(ts, "%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return None
+
+
+def _safe_json_extract(raw: str, fallback: dict):
+    text = (raw or "").strip()
+    if "```" in text:
+        parts = text.split("```")
+        text = parts[1] if len(parts) > 1 else parts[0]
+        if text.startswith("json"):
+            text = text[4:]
+    start = text.find("{")
+    end = text.rfind("}") + 1
+    if start < 0 or end <= start:
+        return fallback
+    try:
+        parsed = json.loads(text[start:end])
+        if isinstance(parsed, dict):
+            return parsed
+    except Exception:
+        pass
+    return fallback
+
+
+def _build_record_information(conn, ticket: dict):
+    sev = (ticket.get("severity") or "P3").upper()
+    now = datetime.now()
+    response_target = ticket.get("response_sla_target_at")
+    resolution_target = ticket.get("resolution_sla_target_at")
+    if not response_target or not resolution_target:
+        computed_response, computed_resolution = _compute_sla_targets(ticket.get("opened_at") or now.strftime("%Y-%m-%d %H:%M:%S"), sev)
+        response_target = response_target or computed_response
+        resolution_target = resolution_target or computed_resolution
+
+    first_response_at = ticket.get("first_response_at")
+    resolved_at = ticket.get("resolved_at")
+    resp_deadline = _parse_dt(response_target)
+    res_deadline = _parse_dt(resolution_target)
+    first_resp_dt = _parse_dt(first_response_at)
+    resolved_dt = _parse_dt(resolved_at)
+
+    response_breached = bool(resp_deadline and not first_resp_dt and now > resp_deadline)
+    resolution_breached = bool(res_deadline and ticket.get("status") != "resolved" and now > res_deadline)
+
+    related_ids = _json_list(ticket.get("related_ticket_ids"))
+    ci_ids = _json_list(ticket.get("ci_ids"))
+
+    return {
+        "ticket_id": ticket.get("id"),
+        "caller_details": {
+            "name": ticket.get("caller_name") or "Unknown",
+            "contact": ticket.get("caller_contact") or "Unknown",
+        },
+        "assignment": {
+            "queue": ticket.get("assigned_group") or _get_fallback_queue(conn),
+            "agent": ticket.get("assigned_agent") or "Unassigned",
+        },
+        "service_context": {
+            "affected_service": ticket.get("affected_service") or "Unspecified",
+            "linked_cis": ci_ids,
+            "parent_ticket_id": ticket.get("parent_ticket_id"),
+            "related_records": related_ids,
+        },
+        "sla": {
+            "severity": sev,
+            "response_target_at": response_target,
+            "resolution_target_at": resolution_target,
+            "first_response_at": first_response_at,
+            "resolved_at": resolved_at,
+            "response_state": "met" if first_resp_dt else ("breached" if response_breached else "in_progress"),
+            "resolution_state": "met" if ticket.get("status") == "resolved" else ("breached" if resolution_breached else "in_progress"),
+            "breach_status": response_breached or resolution_breached,
+        },
+        "ticket_state": {
+            "status": ticket.get("status"),
+            "category": ticket.get("category"),
+            "severity": sev,
+        },
+    }
+
+
+def _generate_incident_summary(conn, ticket_id: str, trigger_event: str = "open"):
+    ticket_row = conn.execute("SELECT * FROM tickets WHERE id=?", (ticket_id,)).fetchone()
+    if not ticket_row:
+        raise HTTPException(404, f"Ticket {ticket_id} not found")
+    ticket = dict(ticket_row)
+    pred_row = conn.execute("SELECT * FROM predictions WHERE ticket_id=? ORDER BY created_at DESC LIMIT 1", (ticket_id,)).fetchone()
+    rca_row = conn.execute("SELECT * FROM rca_results WHERE ticket_id=? ORDER BY created_at DESC LIMIT 1", (ticket_id,)).fetchone()
+    audit_rows = conn.execute("SELECT event_type, action_taken, outcome, reasoning, timestamp FROM audit_log WHERE ticket_id=? ORDER BY timestamp DESC LIMIT 10", (ticket_id,)).fetchall()
+    child_rows = conn.execute("SELECT id, status FROM tickets WHERE parent_ticket_id=?", (ticket_id,)).fetchall()
+
+    record_info = _build_record_information(conn, ticket)
+    actions = [
+        {
+            "timestamp": r["timestamp"],
+            "event": r["event_type"],
+            "action": r["action_taken"],
+            "outcome": r["outcome"],
+        }
+        for r in reversed(audit_rows)
+    ]
+    linked = {
+        "child_incidents": [dict(r) for r in child_rows],
+        "related_records": _json_list(ticket.get("related_ticket_ids")),
+    }
+
+    summary = {
+        "ticket_id": ticket_id,
+        "issue_description": ticket.get("description", ""),
+        "resolution_status": {
+            "status": ticket.get("status"),
+            "notes": ticket.get("resolution_notes") or "",
+        },
+        "key_actions_taken": actions,
+        "sla_breach_information": record_info["sla"],
+        "affected_services_and_cis": {
+            "affected_service": ticket.get("affected_service") or "Unspecified",
+            "cis": _json_list(ticket.get("ci_ids")),
+        },
+        "linked_records": linked,
+        "ai_context": {
+            "predicted_category": dict(pred_row)["predicted_category"] if pred_row else None,
+            "confidence_score": dict(pred_row)["confidence_score"] if pred_row else None,
+            "recommended_fix": dict(rca_row)["recommended_fix"] if rca_row else None,
+            "root_cause": dict(rca_row)["root_cause"] if rca_row else None,
+        },
+    }
+
+    ai_enabled = (_get_feature_config(conn, "summary_ai_enabled", "1") or "1") == "1"
+    if ai_enabled and get_prediction_groq is not None:
+        try:
+            client = get_prediction_groq()
+            payload = json.dumps(summary, ensure_ascii=False)
+            rsp = client.chat.completions.create(
+                model="llama-3.3-70b-versatile",
+                temperature=0.1,
+                max_tokens=500,
+                messages=[
+                    {"role": "system", "content": "Return valid JSON only. Preserve keys and provide concise, structured incident summary fields."},
+                    {"role": "user", "content": f"Refine this ticket summary for operations handoff without changing key names:\n{payload}"},
+                ],
+            )
+            content = rsp.choices[0].message.content if rsp and rsp.choices else ""
+            summary = _safe_json_extract(content, summary)
+        except Exception:
+            pass
+
+    context_hash = hashlib.sha1(json.dumps({
+        "status": ticket.get("status"),
+        "resolution_notes": ticket.get("resolution_notes"),
+        "assigned_group": ticket.get("assigned_group"),
+        "audit": [dict(r) for r in audit_rows],
+    }, sort_keys=True).encode("utf-8")).hexdigest()
+
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    conn.execute("""
+        INSERT INTO incident_summaries(id, ticket_id, summary_json, context_hash, trigger_event, generated_at)
+        VALUES (?,?,?,?,?,?)
+        ON CONFLICT(ticket_id) DO UPDATE SET
+            summary_json=excluded.summary_json,
+            context_hash=excluded.context_hash,
+            trigger_event=excluded.trigger_event,
+            generated_at=excluded.generated_at
+    """, (str(uuid.uuid4()), ticket_id, json.dumps(summary), context_hash, trigger_event, now))
+    return summary
+
+
+def refresh_incident_summary(conn, ticket_id: str, trigger_event: str):
+    if not _is_summary_trigger_enabled(conn, trigger_event):
+        return None
+    try:
+        return _generate_incident_summary(conn, ticket_id, trigger_event=trigger_event)
+    except Exception as e:
+        print(f"⚠️ summary refresh ({ticket_id}): {e}")
+        return None
+
+
+def _mark_first_response(conn, ticket_id: str):
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    conn.execute("""
+        UPDATE tickets SET first_response_at=COALESCE(first_response_at, ?)
+        WHERE id=?
+    """, (now, ticket_id))
 
 
 def write_audit(conn, event_type, ticket_id, **kwargs):
@@ -115,12 +531,19 @@ class TicketIngest(BaseModel):
     description:    str  = Field(..., min_length=3)
     severity:       Optional[str] = None
     category:       Optional[str] = None
+    affected_service: Optional[str] = None
+    ci_ids:         Optional[List[str]] = None
     ci_cat:         Optional[str] = None
     ci_subcat:      Optional[str] = None
     urgency:        Optional[str] = None
     impact:         Optional[str] = None
     alert_status:   Optional[str] = None
+    caller_name:    Optional[str] = None
+    caller_contact: Optional[str] = None
     assigned_group: Optional[str] = None
+    assigned_agent: Optional[str] = None
+    parent_ticket_id: Optional[str] = None
+    related_ticket_ids: Optional[List[str]] = None
     source:         Optional[str] = "manual"
 
 
@@ -332,16 +755,47 @@ def ingest_ticket(ticket: TicketIngest, bg: BackgroundTasks):
         severity = "P3"
 
     category = ticket.category or detect_category(ticket.description, ticket.ci_cat or "")
+    response_sla_target_at, resolution_sla_target_at = _compute_sla_targets(now, severity)
+    ci_ids = _json_list(ticket.ci_ids)
+    routed_queue, matched_rule = route_ticket_to_queue(
+        conn,
+        description=ticket.description,
+        category=category,
+        severity=severity,
+        affected_service=ticket.affected_service or "",
+        ci_ids=ci_ids,
+    )
+    assigned_group = ticket.assigned_group or routed_queue
 
     conn.execute("""
-        INSERT INTO tickets (id, description, severity, category, opened_at, status, assigned_group)
-        VALUES (?,?,?,?,?,?,?)
-    """, (tid, ticket.description, severity, category, now, "open", ticket.assigned_group or "UNASSIGNED"))
+        INSERT INTO tickets (
+            id, description, severity, category, opened_at, status, assigned_group,
+            affected_service, ci_ids, caller_name, caller_contact, assigned_agent,
+            parent_ticket_id, related_ticket_ids, response_sla_target_at, resolution_sla_target_at
+        )
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+    """, (
+        tid, ticket.description, severity, category, now, "open", assigned_group,
+        ticket.affected_service or "",
+        json.dumps(ci_ids),
+        ticket.caller_name or "",
+        ticket.caller_contact or "",
+        ticket.assigned_agent or "",
+        ticket.parent_ticket_id,
+        json.dumps(_json_list(ticket.related_ticket_ids)),
+        response_sla_target_at,
+        resolution_sla_target_at,
+    ))
 
     write_audit(conn, "INGEST", tid,
                 action_taken=f"via {ticket.source}",
                 reasoning=f"explicit={explicit_sev} flags={kw['flags']}",
                 outcome="created")
+    write_audit(conn, "ROUTE", tid,
+                action_taken=f"assigned_queue={assigned_group}",
+                reasoning=f"rule={(matched_rule or {}).get('id', 'fallback')}",
+                outcome="routed")
+    refresh_incident_summary(conn, tid, "ingest")
     conn.commit()
     conn.close()
 
@@ -387,16 +841,47 @@ def bulk_ingest(tickets: List[BulkIngestItem], bg: BackgroundTasks):
             if severity not in ("P1", "P2", "P3"):
                 severity = "P3"
             category = ticket.category or detect_category(ticket.description, ticket.ci_cat or "")
+            response_sla_target_at, resolution_sla_target_at = _compute_sla_targets(now, severity)
+            ci_ids = _json_list(ticket.ci_ids)
+            routed_queue, matched_rule = route_ticket_to_queue(
+                conn,
+                description=ticket.description,
+                category=category,
+                severity=severity,
+                affected_service=ticket.affected_service or "",
+                ci_ids=ci_ids,
+            )
+            assigned_group = ticket.assigned_group or routed_queue
 
             conn.execute("""
-                INSERT INTO tickets (id, description, severity, category, opened_at, status, assigned_group)
-                VALUES (?,?,?,?,?,?,?)
-            """, (tid, ticket.description, severity, category, now, "open",
-                  ticket.assigned_group or "UNASSIGNED"))
+                INSERT INTO tickets (
+                    id, description, severity, category, opened_at, status, assigned_group,
+                    affected_service, ci_ids, caller_name, caller_contact, assigned_agent,
+                    parent_ticket_id, related_ticket_ids, response_sla_target_at, resolution_sla_target_at
+                )
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            """, (
+                tid, ticket.description, severity, category, now, "open",
+                assigned_group,
+                ticket.affected_service or "",
+                json.dumps(ci_ids),
+                ticket.caller_name or "",
+                ticket.caller_contact or "",
+                ticket.assigned_agent or "",
+                ticket.parent_ticket_id,
+                json.dumps(_json_list(ticket.related_ticket_ids)),
+                response_sla_target_at,
+                resolution_sla_target_at,
+            ))
             write_audit(conn, "INGEST", tid,
                         action_taken=f"via {ticket.source}",
                         reasoning=f"bulk explicit={explicit_sev} flags={kw['flags']}",
                         outcome="created")
+            write_audit(conn, "ROUTE", tid,
+                        action_taken=f"assigned_queue={assigned_group}",
+                        reasoning=f"rule={(matched_rule or {}).get('id', 'fallback')}",
+                        outcome="routed")
+            refresh_incident_summary(conn, tid, "ingest")
 
             # Register background tasks (all DB inserts complete before commit,
             # background tasks run after the response is sent)
@@ -492,10 +977,13 @@ def resolve_ticket(ticket_id: str, body: ResolveRequest):
     row  = conn.execute("SELECT * FROM tickets WHERE id=?", (ticket_id,)).fetchone()
     if not row: conn.close(); raise HTTPException(404, f"Ticket {ticket_id} not found")
     now  = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    _mark_first_response(conn, ticket_id)
     conn.execute("UPDATE tickets SET status='resolved',resolved_at=?,resolution_notes=?,resolved_by=? WHERE id=?",
                  (now, body.resolution_notes, body.resolved_by, ticket_id))
+    auto_route_existing_ticket(conn, ticket_id)
     write_audit(conn, "RESOLVE", ticket_id, operator_id=body.resolved_by,
                 action_taken="Approved and executed", reasoning=body.resolution_notes[:100], outcome="resolved")
+    refresh_incident_summary(conn, ticket_id, "update")
     conn.commit()
     if RCA_ENABLED:
         ticket_dict = dict(row)
@@ -513,9 +1001,12 @@ def reject_ticket(ticket_id: str, body: RejectRequest):
     conn = get_db()
     if not conn.execute("SELECT id FROM tickets WHERE id=?", (ticket_id,)).fetchone():
         conn.close(); raise HTTPException(404, f"Ticket {ticket_id} not found")
+    _mark_first_response(conn, ticket_id)
     conn.execute("UPDATE tickets SET status='open' WHERE id=?", (ticket_id,))
+    auto_route_existing_ticket(conn, ticket_id)
     write_audit(conn, "REJECT", ticket_id, operator_id=body.rejected_by,
                 action_taken="Fix rejected by operator", reasoning=body.reason[:200], outcome="rejected")
+    refresh_incident_summary(conn, ticket_id, "update")
     conn.commit(); conn.close()
     return {"message": f"Fix rejected. Ticket {ticket_id} remains open.", "outcome": "rejected"}
 
@@ -527,8 +1018,10 @@ def rollback_ticket(ticket_id: str, body: RollbackRequest):
     row  = conn.execute("SELECT * FROM tickets WHERE id=?", (ticket_id,)).fetchone()
     if not row: conn.close(); raise HTTPException(404, f"Ticket {ticket_id} not found")
     now  = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    _mark_first_response(conn, ticket_id)
     conn.execute("UPDATE tickets SET status='open',resolution_notes=NULL,resolved_at=NULL,resolved_by=NULL WHERE id=?",
                  (ticket_id,))
+    auto_route_existing_ticket(conn, ticket_id)
     write_audit(conn, "ROLLBACK", ticket_id, operator_id=body.rolled_back_by,
                 action_taken="Fix rolled back", reasoning=body.reason[:200], outcome="rolled_back")
     category = dict(row).get("category", "General")
@@ -536,6 +1029,7 @@ def rollback_ticket(ticket_id: str, body: RollbackRequest):
         UPDATE fix_outcomes SET rollback_count=rollback_count+1, total_actions=total_actions+1, last_updated=?
         WHERE category=?
     """, (now, category))
+    refresh_incident_summary(conn, ticket_id, "update")
     conn.commit(); conn.close()
     return {"message": f"Ticket {ticket_id} rolled back to open.", "outcome": "rolled_back"}
 
@@ -635,6 +1129,7 @@ def execute_ticket(ticket_id: str, body: ExecuteRequest):
         SET status='resolved', resolved_at=?, resolution_notes=?, resolved_by=?
         WHERE id=?
     """, (now, body.operator_reason or fix_type, body.operator_id, ticket_id))
+    auto_route_existing_ticket(conn, ticket_id)
 
     # Update fix_outcomes for trust calibration
     conn.execute("""
@@ -719,6 +1214,7 @@ def execute_ticket(ticket_id: str, body: ExecuteRequest):
     except Exception as e:
         print(f"⚠️  Knowledge delta write failed: {e}")
 
+    refresh_incident_summary(conn, ticket_id, "update")
     conn.commit()
 
     # Add to FAISS memory for future RCA
@@ -777,6 +1273,7 @@ def reject_ticket_v2(ticket_id: str, body: RejectV2Request):
 
     # Mark ticket as rejected so clients can see the rejection state
     conn.execute("UPDATE tickets SET status='rejected' WHERE id=?", (ticket_id,))
+    auto_route_existing_ticket(conn, ticket_id)
 
     # Update fix_outcomes reject count
     conn.execute("""
@@ -792,6 +1289,7 @@ def reject_ticket_v2(ticket_id: str, body: RejectV2Request):
                 action_taken=f"Fix rejected via Path {body.approval_path}",
                 reasoning=(body.reject_reason or "")[:200],
                 outcome="rejected")
+    refresh_incident_summary(conn, ticket_id, "update")
     conn.commit(); conn.close()
     return {
         "message":      f"Fix rejected. Ticket {ticket_id} marked as rejected.",
@@ -842,12 +1340,15 @@ def cancel_ticket_user(ticket_id: str, body: dict):
     raised_by = body.get("raised_by", "client_portal")
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
+    _mark_first_response(conn, ticket_id)
     conn.execute("UPDATE tickets SET status='user_cancelled' WHERE id=?", (ticket_id,))
+    auto_route_existing_ticket(conn, ticket_id)
     write_audit(conn, "USER_CANCEL", ticket_id,
                 operator_id=raised_by,
                 action_taken="Ticket cancelled by user",
                 reasoning=cancel_reason,
                 outcome="user_cancelled")
+    refresh_incident_summary(conn, ticket_id, "update")
     conn.commit()
     conn.close()
 
@@ -886,6 +1387,7 @@ def reraise_ticket(ticket_id: str, body: dict):
                 action_taken=f"Re-raised to {assigned_engineer}",
                 reasoning=f"{reraise_reason}. Context: {additional_ctx}",
                 outcome="reraised")
+    refresh_incident_summary(conn, ticket_id, "update")
     conn.commit(); conn.close()
 
     return {
@@ -988,6 +1490,7 @@ def escalate_ticket(ticket_id: str, body: dict):
     priority    = body.get("priority", dict(row).get("severity", "P2"))
     now         = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
+    _mark_first_response(conn, ticket_id)
     conn.execute("""
         UPDATE tickets
         SET status='escalated', assigned_group='SUPPORT-ENGINEER-TEAM'
@@ -999,6 +1502,7 @@ def escalate_ticket(ticket_id: str, body: dict):
                 action_taken=f"Escalated to support engineer team",
                 reasoning=f"Reason: {reason[:200]} | Contact: {contact}",
                 outcome="escalated")
+    refresh_incident_summary(conn, ticket_id, "update")
     conn.commit()
     conn.close()
 
@@ -1232,6 +1736,198 @@ def get_ticket(ticket_id: str):
     conn = get_db(); row = conn.execute("SELECT * FROM tickets WHERE id=?", (ticket_id,)).fetchone(); conn.close()
     if not row: raise HTTPException(404, f"Ticket {ticket_id} not found")
     return dict(row)
+
+
+@app.get("/tickets/{ticket_id}/incident_summary")
+def get_incident_summary(ticket_id: str, force_refresh: bool = False):
+    conn = get_db()
+    if not conn.execute("SELECT id FROM tickets WHERE id=?", (ticket_id,)).fetchone():
+        conn.close(); raise HTTPException(404, f"Ticket {ticket_id} not found")
+    row = conn.execute("SELECT * FROM incident_summaries WHERE ticket_id=?", (ticket_id,)).fetchone()
+    if force_refresh or not row:
+        summary = _generate_incident_summary(conn, ticket_id, trigger_event="open")
+        conn.commit()
+        conn.close()
+        return {"ticket_id": ticket_id, "summary": summary, "source": "generated"}
+    payload = json.loads(row["summary_json"]) if row["summary_json"] else {}
+    conn.close()
+    return {"ticket_id": ticket_id, "summary": payload, "source": "cache", "generated_at": row["generated_at"]}
+
+
+@app.get("/tickets/{ticket_id}/record_information")
+def get_record_information(ticket_id: str):
+    conn = get_db()
+    row = conn.execute("SELECT * FROM tickets WHERE id=?", (ticket_id,)).fetchone()
+    if not row:
+        conn.close(); raise HTTPException(404, f"Ticket {ticket_id} not found")
+    info = _build_record_information(conn, dict(row))
+    conn.close()
+    return info
+
+
+@app.post("/tickets/{ticket_id}/compose/suggestions")
+def compose_suggestions(ticket_id: str, body: dict):
+    audience = (body.get("audience", "customer") or "customer").lower()
+    intent = (body.get("intent", "status_update") or "status_update").lower()
+    conn = get_db()
+    ticket_row = conn.execute("SELECT * FROM tickets WHERE id=?", (ticket_id,)).fetchone()
+    if not ticket_row:
+        conn.close(); raise HTTPException(404, f"Ticket {ticket_id} not found")
+    summary_row = conn.execute("SELECT summary_json FROM incident_summaries WHERE ticket_id=?", (ticket_id,)).fetchone()
+    if not summary_row:
+        summary_payload = _generate_incident_summary(conn, ticket_id, trigger_event="open")
+    else:
+        summary_payload = json.loads(summary_row["summary_json"] or "{}")
+    ticket = dict(ticket_row)
+    tone = "clear, empathetic, non-technical and customer-friendly" if audience == "customer" else "technical, concise and action-oriented for internal ops notes"
+    fallback = (
+        f"Customer update: We are actively working on ticket {ticket_id} ({ticket.get('status')}). "
+        f"Current category is {ticket.get('category')}. We will share the next update shortly."
+        if audience == "customer"
+        else f"Internal note: Ticket {ticket_id} is {ticket.get('status')}. "
+             f"Category={ticket.get('category')} Severity={ticket.get('severity')}. Continue with RCA and queue handoff."
+    )
+    draft = fallback
+    source = "fallback"
+    if get_prediction_groq is not None:
+        try:
+            client = get_prediction_groq()
+            prompt = json.dumps({
+                "ticket": ticket,
+                "summary": summary_payload,
+                "intent": intent,
+                "audience": audience,
+            }, ensure_ascii=False)
+            rsp = client.chat.completions.create(
+                model="llama-3.3-70b-versatile",
+                temperature=0.2,
+                max_tokens=220,
+                messages=[
+                    {"role": "system", "content": f"You draft ITSM incident updates in a {tone} style. Return plain text only."},
+                    {"role": "user", "content": f"Draft one {audience} note for this context:\n{prompt}"},
+                ],
+            )
+            ai_text = (rsp.choices[0].message.content or "").strip() if rsp and rsp.choices else ""
+            if ai_text:
+                draft = ai_text
+                source = "ai"
+        except Exception:
+            pass
+    write_audit(conn, "COMPOSE_SUGGEST", ticket_id,
+                operator_id=body.get("operator_id", "system_ai"),
+                action_taken=f"compose_{audience}",
+                reasoning=f"intent={intent}",
+                outcome=source)
+    conn.commit()
+    conn.close()
+    return {
+        "ticket_id": ticket_id,
+        "audience": audience,
+        "intent": intent,
+        "draft": draft,
+        "source": source,
+    }
+
+
+@app.post("/tickets/{ticket_id}/route")
+def reroute_ticket(ticket_id: str, body: dict):
+    conn = get_db()
+    row = conn.execute("SELECT * FROM tickets WHERE id=?", (ticket_id,)).fetchone()
+    if not row:
+        conn.close(); raise HTTPException(404, f"Ticket {ticket_id} not found")
+    ticket = dict(row)
+    queue, rule = route_ticket_to_queue(
+        conn,
+        description=body.get("description") or ticket.get("description", ""),
+        category=body.get("category") or ticket.get("category", ""),
+        severity=body.get("severity") or ticket.get("severity", ""),
+        affected_service=body.get("affected_service") or ticket.get("affected_service", ""),
+        ci_ids=_json_list(body.get("ci_ids") if body.get("ci_ids") is not None else ticket.get("ci_ids")),
+    )
+    conn.execute("UPDATE tickets SET assigned_group=? WHERE id=?", (queue, ticket_id))
+    write_audit(conn, "ROUTE", ticket_id,
+                operator_id=body.get("operator_id", "routing_engine"),
+                action_taken=f"assigned_queue={queue}",
+                reasoning=f"rule={(rule or {}).get('id', 'fallback')}",
+                outcome="routed")
+    refresh_incident_summary(conn, ticket_id, "update")
+    conn.commit()
+    conn.close()
+    return {"ticket_id": ticket_id, "assigned_group": queue, "matched_rule": rule.get("id") if rule else None}
+
+
+@app.get("/config/routing")
+def get_routing_config():
+    conn = get_db()
+    fallback = _get_fallback_queue(conn)
+    rules = [dict(r) for r in conn.execute("SELECT * FROM routing_rules ORDER BY priority ASC, updated_at DESC").fetchall()]
+    conn.close()
+    return {"fallback_queue": fallback, "rules": rules}
+
+
+@app.put("/config/routing/fallback")
+def update_fallback_queue(body: dict):
+    queue = (body.get("fallback_queue") or "").strip()
+    if not queue:
+        raise HTTPException(400, "fallback_queue is required")
+    conn = get_db()
+    conn.execute("""
+        INSERT INTO routing_config(key, value) VALUES ('fallback_queue', ?)
+        ON CONFLICT(key) DO UPDATE SET value=excluded.value
+    """, (queue,))
+    conn.commit()
+    conn.close()
+    return {"fallback_queue": queue}
+
+
+@app.post("/config/routing/rules")
+def upsert_routing_rule(body: dict):
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    rule_id = body.get("id") or f"rule-{uuid.uuid4().hex[:8]}"
+    queue = (body.get("queue") or "").strip()
+    name = (body.get("name") or "Custom Rule").strip()
+    if not queue:
+        raise HTTPException(400, "queue is required")
+    conn = get_db()
+    conn.execute("""
+        INSERT INTO routing_rules
+        (id, name, enabled, priority, category_match, service_match, severity_match, ci_match, keyword_match, queue, created_at, updated_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+        ON CONFLICT(id) DO UPDATE SET
+            name=excluded.name, enabled=excluded.enabled, priority=excluded.priority,
+            category_match=excluded.category_match, service_match=excluded.service_match,
+            severity_match=excluded.severity_match, ci_match=excluded.ci_match,
+            keyword_match=excluded.keyword_match, queue=excluded.queue, updated_at=excluded.updated_at
+    """, (
+        rule_id, name, int(body.get("enabled", 1)), int(body.get("priority", 100)),
+        body.get("category_match"), body.get("service_match"), body.get("severity_match"),
+        body.get("ci_match"), body.get("keyword_match"), queue, now, now,
+    ))
+    conn.commit()
+    conn.close()
+    return {"id": rule_id, "status": "saved"}
+
+
+@app.put("/config/summary/triggers")
+def update_summary_triggers(body: dict):
+    triggers = {
+        "on_ingest": bool(body.get("on_ingest", True)),
+        "on_update": bool(body.get("on_update", True)),
+        "on_open": bool(body.get("on_open", True)),
+    }
+    ai_enabled = "1" if bool(body.get("ai_enabled", True)) else "0"
+    conn = get_db()
+    conn.execute("""
+        INSERT INTO feature_config(key, value) VALUES ('summary_triggers', ?)
+        ON CONFLICT(key) DO UPDATE SET value=excluded.value
+    """, (json.dumps(triggers),))
+    conn.execute("""
+        INSERT INTO feature_config(key, value) VALUES ('summary_ai_enabled', ?)
+        ON CONFLICT(key) DO UPDATE SET value=excluded.value
+    """, (ai_enabled,))
+    conn.commit()
+    conn.close()
+    return {"summary_triggers": triggers, "ai_enabled": ai_enabled == "1"}
 
 
 @app.get("/tickets/{ticket_id}/audit")
@@ -1594,3 +2290,6 @@ def federated_signal(category: str):
     if not FEDERATED_ENABLED:
         raise HTTPException(503, "Federated learning module not available")
     return get_federated_confidence_boost(category)
+    _mark_first_response(conn, ticket_id)
+    _mark_first_response(conn, ticket_id)
+    _mark_first_response(conn, ticket_id)

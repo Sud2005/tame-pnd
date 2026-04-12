@@ -32,6 +32,16 @@ CREATE TABLE IF NOT EXISTS tickets (
     resolution_time_hrs REAL,
     resolution_notes    TEXT,
     assigned_group      TEXT,
+    affected_service    TEXT,
+    ci_ids              TEXT,
+    caller_name         TEXT,
+    caller_contact      TEXT,
+    assigned_agent      TEXT,
+    parent_ticket_id    TEXT,
+    related_ticket_ids  TEXT,
+    response_sla_target_at   TEXT,
+    resolution_sla_target_at TEXT,
+    first_response_at   TEXT,
     resolved_by         TEXT,
     status              TEXT DEFAULT 'open',    -- open / pending_approval / resolved
     created_at          TEXT DEFAULT (datetime('now'))
@@ -164,6 +174,43 @@ CREATE TABLE IF NOT EXISTS incident_clusters (
     acknowledged_at      TEXT
 );
 
+-- Configurable routing engine
+CREATE TABLE IF NOT EXISTS routing_rules (
+    id                  TEXT PRIMARY KEY,
+    name                TEXT NOT NULL,
+    enabled             INTEGER DEFAULT 1,
+    priority            INTEGER DEFAULT 100,
+    category_match      TEXT,
+    service_match       TEXT,
+    severity_match      TEXT,
+    ci_match            TEXT,
+    keyword_match       TEXT,
+    queue               TEXT NOT NULL,
+    created_at          TEXT DEFAULT (datetime('now')),
+    updated_at          TEXT DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS routing_config (
+    key                 TEXT PRIMARY KEY,
+    value               TEXT
+);
+
+-- Configurable AI features
+CREATE TABLE IF NOT EXISTS feature_config (
+    key                 TEXT PRIMARY KEY,
+    value               TEXT
+);
+
+CREATE TABLE IF NOT EXISTS incident_summaries (
+    id                  TEXT PRIMARY KEY,
+    ticket_id           TEXT UNIQUE NOT NULL,
+    summary_json        TEXT NOT NULL,
+    context_hash        TEXT,
+    trigger_event       TEXT,
+    generated_at        TEXT DEFAULT (datetime('now')),
+    FOREIGN KEY (ticket_id) REFERENCES tickets(id)
+);
+
 -- Indexes for performance
 CREATE INDEX IF NOT EXISTS idx_tickets_status    ON tickets(status);
 CREATE INDEX IF NOT EXISTS idx_tickets_severity  ON tickets(severity);
@@ -173,6 +220,8 @@ CREATE INDEX IF NOT EXISTS idx_audit_time        ON audit_log(timestamp);
 CREATE INDEX IF NOT EXISTS idx_deltas_ticket     ON knowledge_deltas(ticket_id);
 CREATE INDEX IF NOT EXISTS idx_deltas_category   ON knowledge_deltas(category);
 CREATE INDEX IF NOT EXISTS idx_clusters_status   ON incident_clusters(status);
+CREATE INDEX IF NOT EXISTS idx_routing_rules_enabled ON routing_rules(enabled, priority);
+CREATE INDEX IF NOT EXISTS idx_incident_summaries_ticket ON incident_summaries(ticket_id);
 """
 
 # ─── Fix type seeds for trust calibration table ──────────────────────────────
@@ -199,6 +248,14 @@ FIX_TYPES = [
     ("General", "investigate_logs",      25, 1, 0),
 ]
 
+DEFAULT_ROUTING_RULES = [
+    ("network-domain", "Network Domain Routing", 1, 10, "Network", "vpn,dns,firewall,network", "P1,P2,P3", "", "network,router,vpn,dns,firewall,switch", "Network_Ops"),
+    ("app-domain", "Application Domain Routing", 1, 20, "Application,Authentication", "portal,api,application,app,sso", "P1,P2,P3", "", "application,api,login,auth,sso,token", "App_Support"),
+    ("db-domain", "Database Domain Routing", 1, 30, "Database", "db,database,oracle,sql,postgres", "P1,P2,P3", "", "database,db,sql,replication,storage", "Database_Team"),
+    ("infra-domain", "Infrastructure Domain Routing", 1, 40, "Infrastructure", "server,compute,disk,memory,container", "P1,P2,P3", "", "server,cpu,memory,disk,container", "Infra_Ops"),
+    ("security-domain", "Security Domain Routing", 1, 50, "General,Authentication,Network,Application,Database,Infrastructure", "security", "P1,P2,P3", "", "breach,malware,ransomware,exploit,unauthorized", "Security_Ops"),
+]
+
 
 def seed_fix_outcomes(conn):
     for category, fix_type, approves, rejects, rollbacks in FIX_TYPES:
@@ -214,6 +271,28 @@ def seed_fix_outcomes(conn):
             VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """, (str(uuid.uuid4()), category, fix_type,
               approves, rejects, rollbacks, total, calibrated))
+
+
+def seed_routing_and_feature_config(conn):
+    conn.execute("""
+        INSERT OR IGNORE INTO routing_config(key, value)
+        VALUES ('fallback_queue', 'L1_Support_Queue')
+    """)
+    conn.execute("""
+        INSERT OR IGNORE INTO feature_config(key, value)
+        VALUES ('summary_triggers', '{"on_ingest": true, "on_update": true, "on_open": true}')
+    """)
+    conn.execute("""
+        INSERT OR IGNORE INTO feature_config(key, value)
+        VALUES ('summary_ai_enabled', '1')
+    """)
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    for rid, name, enabled, priority, category_match, service_match, severity_match, ci_match, keyword_match, queue in DEFAULT_ROUTING_RULES:
+        conn.execute("""
+            INSERT OR IGNORE INTO routing_rules
+            (id, name, enabled, priority, category_match, service_match, severity_match, ci_match, keyword_match, queue, created_at, updated_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+        """, (rid, name, enabled, priority, category_match, service_match, severity_match, ci_match, keyword_match, queue, now, now))
 
 
 def seed_tickets_from_csv(conn, csv_path):
@@ -319,6 +398,11 @@ def main():
     conn.commit()
     print(f"   ✅ {len(FIX_TYPES)} fix types seeded")
 
+    print(f"\n🧭 Seeding routing and summary configuration...")
+    seed_routing_and_feature_config(conn)
+    conn.commit()
+    print(f"   ✅ {len(DEFAULT_ROUTING_RULES)} routing rules seeded")
+
     print(f"\n📥 Loading tickets from {args.data}...")
     inserted, skipped = seed_tickets_from_csv(conn, args.data)
     conn.commit()
@@ -341,6 +425,7 @@ def main():
         "resolved":         conn.execute("SELECT COUNT(*) FROM tickets WHERE status='resolved'").fetchone()[0],
         "audit_entries":    conn.execute("SELECT COUNT(*) FROM audit_log").fetchone()[0],
         "fix_types":        conn.execute("SELECT COUNT(*) FROM fix_outcomes").fetchone()[0],
+        "routing_rules":    conn.execute("SELECT COUNT(*) FROM routing_rules").fetchone()[0],
     }
 
     print(f"\n{'='*45}")
