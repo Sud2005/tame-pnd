@@ -249,11 +249,11 @@ FIX_TYPES = [
 ]
 
 DEFAULT_ROUTING_RULES = [
-    ("network-domain", "Network Domain Routing", 1, 10, "Network", "vpn,dns,firewall,network", "P1,P2,P3", "", "network,router,vpn,dns,firewall,switch", "Network_Ops"),
-    ("app-domain", "Application Domain Routing", 1, 20, "Application,Authentication", "portal,api,application,app,sso", "P1,P2,P3", "", "application,api,login,auth,sso,token", "App_Support"),
-    ("db-domain", "Database Domain Routing", 1, 30, "Database", "db,database,oracle,sql,postgres", "P1,P2,P3", "", "database,db,sql,replication,storage", "Database_Team"),
-    ("infra-domain", "Infrastructure Domain Routing", 1, 40, "Infrastructure", "server,compute,disk,memory,container", "P1,P2,P3", "", "server,cpu,memory,disk,container", "Infra_Ops"),
-    ("security-domain", "Security Domain Routing", 1, 50, "General,Authentication,Network,Application,Database,Infrastructure", "security", "P1,P2,P3", "", "breach,malware,ransomware,exploit,unauthorized", "Security_Ops"),
+    ("network-domain", "Network Domain Routing", 1, 10, "Network", "vpn,dns,firewall,network", "P1,P2,P3", "network,dns,vpn,firewall,switch", "network,router,vpn,dns,firewall,switch", "Network_Ops"),
+    ("app-domain", "Application Domain Routing", 1, 20, "Application,Authentication", "portal,api,application,app,sso", "P1,P2,P3", "application,api,portal,sso", "application,api,login,auth,sso,token", "App_Support"),
+    ("db-domain", "Database Domain Routing", 1, 30, "Database", "db,database,oracle,sql,postgres", "P1,P2,P3", "database,sql,storage,oracle,postgres", "database,db,sql,replication,storage", "Database_Team"),
+    ("infra-domain", "Infrastructure Domain Routing", 1, 40, "Infrastructure", "server,compute,disk,memory,container", "P1,P2,P3", "server,compute,memory,disk,container", "server,cpu,memory,disk,container", "Infra_Ops"),
+    ("security-domain", "Security Domain Routing", 1, 50, "General,Authentication,Network,Application,Database,Infrastructure", "security", "P1,P2,P3", "security,iam,network,application,database", "breach,malware,ransomware,exploit,unauthorized", "Security_Ops"),
 ]
 
 

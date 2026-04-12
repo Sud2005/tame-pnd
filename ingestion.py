@@ -184,18 +184,18 @@ def ensure_schema_extensions(conn):
     if rules_count == 0:
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         default_rules = [
-            ("network-domain", "Network Domain Routing", 1, 10, "Network", "vpn,dns,firewall,network", "P1,P2,P3", "network,router,vpn,dns,firewall,switch", "Network_Ops"),
-            ("app-domain", "Application Domain Routing", 1, 20, "Application,Authentication", "portal,api,application,app,sso", "P1,P2,P3", "application,api,login,auth,sso,token", "App_Support"),
-            ("db-domain", "Database Domain Routing", 1, 30, "Database", "db,database,oracle,sql,postgres", "P1,P2,P3", "database,db,sql,replication,storage", "Database_Team"),
-            ("infra-domain", "Infrastructure Domain Routing", 1, 40, "Infrastructure", "server,compute,disk,memory,container", "P1,P2,P3", "server,cpu,memory,disk,container", "Infra_Ops"),
-            ("security-domain", "Security Domain Routing", 1, 50, "General,Authentication,Network,Application,Database,Infrastructure", "security", "P1,P2,P3", "breach,malware,ransomware,exploit,unauthorized", "Security_Ops"),
+            ("network-domain", "Network Domain Routing", 1, 10, "Network", "vpn,dns,firewall,network", "P1,P2,P3", "network,dns,vpn,firewall,switch", "network,router,vpn,dns,firewall,switch", "Network_Ops"),
+            ("app-domain", "Application Domain Routing", 1, 20, "Application,Authentication", "portal,api,application,app,sso", "P1,P2,P3", "application,api,portal,sso", "application,api,login,auth,sso,token", "App_Support"),
+            ("db-domain", "Database Domain Routing", 1, 30, "Database", "db,database,oracle,sql,postgres", "P1,P2,P3", "database,sql,storage,oracle,postgres", "database,db,sql,replication,storage", "Database_Team"),
+            ("infra-domain", "Infrastructure Domain Routing", 1, 40, "Infrastructure", "server,compute,disk,memory,container", "P1,P2,P3", "server,compute,memory,disk,container", "server,cpu,memory,disk,container", "Infra_Ops"),
+            ("security-domain", "Security Domain Routing", 1, 50, "General,Authentication,Network,Application,Database,Infrastructure", "security", "P1,P2,P3", "security,iam,network,application,database", "breach,malware,ransomware,exploit,unauthorized", "Security_Ops"),
         ]
-        for rid, name, enabled, priority, category_match, service_match, severity_match, keyword_match, queue in default_rules:
+        for rid, name, enabled, priority, category_match, service_match, severity_match, ci_match, keyword_match, queue in default_rules:
             conn.execute("""
                 INSERT OR IGNORE INTO routing_rules
-                (id, name, enabled, priority, category_match, service_match, severity_match, keyword_match, queue, created_at, updated_at)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?)
-            """, (rid, name, enabled, priority, category_match, service_match, severity_match, keyword_match, queue, now, now))
+                (id, name, enabled, priority, category_match, service_match, severity_match, ci_match, keyword_match, queue, created_at, updated_at)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+            """, (rid, name, enabled, priority, category_match, service_match, severity_match, ci_match, keyword_match, queue, now, now))
 
     conn.commit()
 
@@ -2290,6 +2290,3 @@ def federated_signal(category: str):
     if not FEDERATED_ENABLED:
         raise HTTPException(503, "Federated learning module not available")
     return get_federated_confidence_boost(category)
-    _mark_first_response(conn, ticket_id)
-    _mark_first_response(conn, ticket_id)
-    _mark_first_response(conn, ticket_id)
