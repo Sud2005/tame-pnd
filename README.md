@@ -41,6 +41,12 @@ TamePND gets smarter every time it's used. It organically tracks `fix_outcomes`.
 ### 6. Voice-Enabled Client Portal
 A sleek, standalone client-facing portal (`/portal`) equipped with the **Web Speech API**. End users can simply describe their issue out loud, and the AI streams the conversation, generates the ticket, and pushes it directly into the Governance Live Feed via WebSockets.
 
+### 7. NEW: Intelligent Incident Summarization
+The system now automatically generates structured "Operations Summaries" for every incident. These summaries distill complex technical logs into concise, actionable handoff reports, including SLA status, key actions taken, and AI-predicted root causes.
+
+### 8. NEW: Predictive Incident Clustering
+Integrates a standalone scanner that identifies bursts of similar incidents in real-time. This allows operators to detect larger outages before they escalate into high-severity P1 crises.
+
 ---
 
 ## 🏗 System Architecture (5 Layers)
@@ -80,7 +86,7 @@ python -m venv venv
 pip install -r requirements.txt
 
 # Setup Frontend
-cd frontend
+cd dashboard
 npm install
 cd ..
 ```
@@ -104,7 +110,7 @@ uvicorn ingestion:app --reload --port 8000
 
 **Terminal 2 — Frontend Governance Dashboard**
 ```bash
-cd frontend
+cd dashboard
 npm run dev
 ```
 

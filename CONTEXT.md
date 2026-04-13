@@ -1,7 +1,7 @@
 # TamePND — OpsAI Project Context
 # Human-Governed Autonomous AI Support System
 # Feed this entire file to Claude Opus / Antigravity before any bug fix or improvement request
-# Last updated: March 24, 2026
+# Last updated: April 13, 2026
 
 ---
 
@@ -461,6 +461,36 @@ dashboard/dist/
 
 ---
 
+---
+
+## ⚡ LATEST UPDATES (APRIL 2026)
+
+### 1. AI-Powered Incident Summarization
+- Added a dedicated panel for AI-generated incident summaries using Groq LLaMA 3.3-70B.
+- Summaries are triggered on ingestion, status updates, and ticket opening.
+- Provides a clean "Operations Handoff" view with key actions, SLA status, and AI insights.
+
+### 2. UI/UX Revamp: My Tickets Priority View
+- Reordered the "My Tickets" tab to show the Detail Preview (including AI Summary) above the ticket list.
+- Improved visibility for critical P1/P2 incidents during triage.
+- Added animated confidence bars and real-time status indicators.
+
+### 3. Portal Incident Workspace Tabs
+- Enhanced the Client Portal with structured workspace tabs.
+- Allows users to track their specific incidents with detailed status views.
+- Deep integration with the backend routing engine for real-time updates.
+
+### 4. Advanced Routing & Metadata Engine
+- Implemented configurable routing rules in the backend (stored in SQLite).
+- Added record metadata tracking (caller info, CI context, SLA targets).
+- Integrated `cluster_detector.py` for identifying similar incident bursts.
+
+### 5. Deterministic Jitter & Path Optimization
+- Resolved Path C over-divergence by implementing deterministic jitter in scores.
+- Optimized thresholds for Path A (Auto-Execute) and Path B (Approval).
+
+---
+
 ## KNOWN BUGS & ISSUES
 
 ### BUG 1 — Repetitive 55% Confidence / Path C Over-divergence [FULLY FIXED]
@@ -556,17 +586,11 @@ not implemented. executions table has rolled_back column ready.
 
 ## WHAT TO BUILD NEXT (Priority Order)
 
-1. **POST /tickets/{id}/execute endpoint** — writes to approval_actions + executions tables
-2. **POST /executions/{id}/rollback endpoint** — restores pre_state + penalises confidence
-3. **Remediation scripts** — 4 real simulations:
-   - restart_service: sleep(2), return success
-   - clear_cache: delete temp file, return success
-   - scale_up: UPDATE config SET value=value+1 in SQLite
-   - rollback: revert above config change
-4. **WebSocket for real-time feed** — replace setInterval polling
-5. **Improve description synthesis** — better CI_Cat → text mapping for ITSM dataset
-6. **Add /tickets/{id}/predict endpoint** — manually re-trigger prediction
-7. **Confidence trend chart** — show how trust calibration improves over time
+1. **Predictive Incident Clustering UI** — Visualise the clusters detected by `cluster_detector.py` on the dashboard.
+2. **WebSocket Stability** — Further refine the live feed replacement for polling.
+3. **Confidence Trend Chart** — Show how trust calibration improves over time.
+4. **Enhanced Description Synthesis** — better CI_Cat → text mapping for ITSM dataset.
+5. **Multi-Region Support** — Partitioning data and models by region.
 
 ---
 
