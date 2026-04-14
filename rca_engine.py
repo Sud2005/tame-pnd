@@ -513,6 +513,83 @@ def determine_risk_tier(confidence: int, severity: str, similar: list[dict]) -> 
     return base_risk
 
 
+# ── Degraded-mode RCA synthesis (when LLM is unavailable) ─────────────────────
+
+def _synthesize_rca_without_llm(ticket: dict, similar: list[dict], error: str) -> dict:
+    """
+    Build a ticket-specific RCA payload from similar incidents when Groq is
+    unavailable. This avoids generic fallback output and keeps workflows usable.
+    """
+    top = similar[0] if similar else {}
+    ticket_desc = (ticket.get("description") or "Incident reported").strip()
+    category = (ticket.get("category") or top.get("category") or "General").strip() or "General"
+    severity = (ticket.get("severity") or "P3").strip() or "P3"
+
+    top_resolution = (
+        top.get("resolution_notes") or
+        top.get("closure_code") or
+        "No prior explicit resolution notes were available."
+    )
+    top_resolution = str(top_resolution).strip()
+
+    top_match_id = top.get("id", "N/A")
+    top_match_pct = top.get("similarity_pct", 0)
+    try:
+        top_match_pct = float(top_match_pct)
+    except Exception:
+        top_match_pct = 0.0
+
+    est_candidates = []
+    for s in similar[:3]:
+        try:
+            hrs = float(s.get("resolution_time_hrs"))
+            if hrs > 0:
+                est_candidates.append(hrs)
+        except Exception:
+            continue
+    estimated_hrs = round(float(np.mean(est_candidates)), 1) if est_candidates else 2.0
+
+    root_cause = (
+        f"Pattern match indicates a likely {category.lower()} failure scenario similar to "
+        f"historical ticket {top_match_id} ({top_match_pct:.1f}% similarity). "
+        f"The current symptoms suggest the same service/component path is degraded."
+    )
+    recommended_fix = (
+        f"Apply the validated remediation pattern from similar incidents, beginning with: "
+        f"{top_resolution[:180]}"
+    )
+
+    fix_steps = [
+        f"Step 1 — Diagnose & Verify: Confirm the reported issue is reproducible for this {severity}/{category} incident by checking service health, recent alerts, and the last 30 minutes of logs for the affected component. Verify the observed errors align with the ticket symptoms: '{ticket_desc[:120]}'.",
+        "Step 2 — Backup & Safety Pre-check: Capture the current state before changes (configuration snapshot, active connections/sessions, key service metrics, and dependency health). Confirm rollback ownership and ensure change window/SLA constraints are understood before remediation.",
+        f"Step 3 — Apply Primary Remediation: Execute the known-good action pattern derived from prior similar incidents (top match {top_match_id}): {top_resolution[:220]}. Apply changes incrementally and validate after each sub-step to avoid cascading impact.",
+        "Step 4 — Validate Functional Recovery: Re-run the failing transaction/user flow, verify error rates drop to baseline, and confirm no new critical warnings appear in logs/monitoring. Ensure dependent systems (database, network, auth, queues) remain healthy after the fix.",
+        "Step 5 — Monitor & Document: Monitor stability for at least 20-30 minutes, record exact remediation actions and evidence in the ticket, and update follow-up items to prevent recurrence. Escalate to senior engineering immediately if symptoms persist or recur.",
+    ]
+
+    citations = []
+    for i, s in enumerate(similar[:3], 1):
+        sid = s.get("id", "N/A")
+        sdesc = (s.get("description") or "").strip()[:90]
+        spct = s.get("similarity_pct", 0)
+        try:
+            spct = float(spct)
+        except Exception:
+            spct = 0.0
+        citations.append(f"Past Incident #{i} ({sid}) — {spct:.1f}% match: {sdesc}")
+
+    return {
+        "root_cause": root_cause,
+        "recommended_fix": recommended_fix,
+        "fix_steps": fix_steps,
+        "estimated_resolution_hrs": estimated_hrs,
+        "pattern_match": f"{category} incident archetype recovered from semantic similarity index",
+        "source_citations": citations,
+        "warnings": f"LLM synthesis unavailable ({error[:120]}). Generated RCA from historical similarity.",
+        "raw_confidence": 58,
+    }
+
+
 # ── Groq RCA synthesis prompt ─────────────────────────────────────────────────
 
 def build_rca_prompt(new_ticket: dict, similar: list[dict]) -> str:
@@ -653,27 +730,33 @@ def run_rca(ticket_id: str) -> dict:
         if not similar:
             raise RuntimeError("No similar incidents found in index")
 
-        # ── Step 2: Groq synthesis (uses cached client + retry) ───────────────
-        prompt = build_rca_prompt(ticket, similar)
-        messages = [
-            {
-                "role": "system",
-                "content": (
-                    "You are an expert IT operations engineer performing root cause analysis. "
-                    "Always respond with valid JSON only. No markdown. No extra text. "
-                    "Be specific and actionable in your analysis. "
-                    "CRITICAL: The 'fix_steps' array MUST contain 5-7 highly detailed steps. "
-                    "Each step must be at least 2 sentences long, including what to do, how to do it (commands/tools), "
-                    "and how to verify success. A junior engineer must be able to follow your steps without asking questions. "
-                    "NEVER output fewer than 5 steps. NEVER output single-sentence steps."
-                )
-            },
-            {"role": "user", "content": prompt}
-        ]
-        raw = _groq_chat_with_retry(messages, max_tokens=2500)
-
-        # ── Step 3: Parse response ────────────────────────────────────────────
-        parsed = _parse_rca_response(raw)
+        # ── Step 2: RCA synthesis (Groq, with local degraded fallback) ───────
+        model_used = GROQ_MODEL
+        status = "success"
+        try:
+            prompt = build_rca_prompt(ticket, similar)
+            messages = [
+                {
+                    "role": "system",
+                    "content": (
+                        "You are an expert IT operations engineer performing root cause analysis. "
+                        "Always respond with valid JSON only. No markdown. No extra text. "
+                        "Be specific and actionable in your analysis. "
+                        "CRITICAL: The 'fix_steps' array MUST contain 5-7 highly detailed steps. "
+                        "Each step must be at least 2 sentences long, including what to do, how to do it (commands/tools), "
+                        "and how to verify success. A junior engineer must be able to follow your steps without asking questions. "
+                        "NEVER output fewer than 5 steps. NEVER output single-sentence steps."
+                    )
+                },
+                {"role": "user", "content": prompt}
+            ]
+            raw = _groq_chat_with_retry(messages, max_tokens=2500)
+            parsed = _parse_rca_response(raw)
+        except Exception as llm_err:
+            print(f"⚠️  Groq unavailable, using local RCA synthesis: {llm_err}")
+            parsed = _synthesize_rca_without_llm(ticket, similar, str(llm_err))
+            model_used = "local_similarity_synthesis"
+            status = "success"
 
         # ── Step 4: Calibrate confidence + determine risk ─────────────────────
         # Don't trust the LLM's confidence blindly — calibrate with data
@@ -714,8 +797,8 @@ def run_rca(ticket_id: str) -> dict:
                 }
                 for s in similar[:3]
             ],
-            "model_used":   GROQ_MODEL,
-            "status":       "success",
+            "model_used":   model_used,
+            "status":       status,
             "federated_signal": federated_signal,
         }
 
