@@ -37,6 +37,7 @@ STORE_PATH      = "db/memory_store.pkl"  # parallel list of ticket dicts
 EMBED_MODEL     = "all-MiniLM-L6-v2"    # fast, accurate, free, runs locally
 GROQ_MODEL      = "llama-3.3-70b-versatile"
 MIN_RESOLVED    = 5    # minimum resolved tickets needed before RCA is useful
+MAX_INDEX_SIZE  = 50000
 
 # Lazy-loaded globals (only built once at startup)
 _faiss_index    = None
@@ -180,12 +181,21 @@ def build_index(force_rebuild: bool = False) -> tuple:
 
     if not force_rebuild and Path(INDEX_PATH).exists() and Path(STORE_PATH).exists():
         print("📂 Loading existing FAISS index from disk...")
-        index  = faiss.read_index(INDEX_PATH)
-        with open(STORE_PATH, "rb") as f:
-            store = pickle.load(f)
-        print(f"   ✅ Index loaded: {index.ntotal:,} vectors")
-        _index_ready = True
-        return index, store
+        try:
+            index = faiss.read_index(INDEX_PATH)
+            with open(STORE_PATH, "rb") as f:
+                store = pickle.load(f)
+            if not isinstance(store, list):
+                raise ValueError("memory store is not a list")
+            if index.ntotal != len(store):
+                raise ValueError(
+                    f"FAISS/store size mismatch ({index.ntotal} vectors vs {len(store)} records)"
+                )
+            print(f"   ✅ Index loaded: {index.ntotal:,} vectors")
+            _index_ready = True
+            return index, store
+        except Exception as e:
+            print(f"   ⚠️  Existing index invalid ({e}) — rebuilding...")
 
     print("🔨 Building FAISS index...")
     conn = sqlite3.connect(DB_PATH)
@@ -200,8 +210,8 @@ def build_index(force_rebuild: bool = False) -> tuple:
           AND  resolution_notes IS NOT NULL
           AND  resolution_notes NOT IN ('', 'nan', 'None', 'NaN')
         ORDER  BY opened_at DESC
-        LIMIT  50000
-    """).fetchall()
+        LIMIT  ?
+    """, (MAX_INDEX_SIZE,)).fetchall()
     print(f"   Resolved with notes: {len(rows):,}")
 
     # Attempt 2: use all resolved
@@ -213,8 +223,8 @@ def build_index(force_rebuild: bool = False) -> tuple:
             FROM   tickets
             WHERE  LOWER(status) = 'resolved'
             ORDER  BY opened_at DESC
-            LIMIT  50000
-        """).fetchall()
+            LIMIT  ?
+        """, (MAX_INDEX_SIZE,)).fetchall()
         print(f"   All resolved: {len(rows):,}")
 
     # Attempt 3: last resort — include all tickets regardless of status
@@ -225,8 +235,8 @@ def build_index(force_rebuild: bool = False) -> tuple:
                    status
             FROM   tickets
             ORDER  BY opened_at DESC
-            LIMIT  50000
-        """).fetchall()
+            LIMIT  ?
+        """, (MAX_INDEX_SIZE,)).fetchall()
         print(f"   All tickets: {len(rows):,}")
 
     conn.close()
