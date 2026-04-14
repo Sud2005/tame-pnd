@@ -27,7 +27,10 @@ from pydantic import BaseModel, Field
 
 DB_PATH = "db/opsai.db"
 _MAX_REASON_LEN = 500   # max length for operator reason / rollback reason strings stored in DB
-DEMO_SCALE = 242        # Used to artificially inflate summary counts for hackathon demo video
+try:
+    DEMO_SCALE = max(1, int(os.getenv("DEMO_SCALE", "1")))
+except Exception:
+    DEMO_SCALE = 1
 _schema_extensions_ready = False
 
 DEFAULT_FALLBACK_QUEUE = "L1_Support_Queue"
@@ -125,6 +128,25 @@ def ensure_schema_extensions(conn):
     for col, col_type in ticket_column_migrations:
         if col not in cols:
             conn.execute("ALTER TABLE tickets ADD COLUMN " + col + " " + col_type)
+
+    # Backward-compatible RCA schema migration (older DBs may miss this column)
+    rca_cols = {row["name"] for row in conn.execute("PRAGMA table_info(rca_results)").fetchall()}
+    if rca_cols and "fix_steps" not in rca_cols:
+        conn.execute("ALTER TABLE rca_results ADD COLUMN fix_steps TEXT")
+
+    # Normalize historical status values from imported CSVs to canonical values
+    conn.execute("""
+        UPDATE tickets
+        SET status = CASE
+            WHEN status IS NULL OR TRIM(status) = '' THEN 'open'
+            WHEN LOWER(TRIM(status)) IN ('resolved', 'close', 'closed') THEN 'resolved'
+            WHEN LOWER(TRIM(status)) IN ('pending_approval', 'pending approval', 'pending') THEN 'pending_approval'
+            WHEN LOWER(TRIM(status)) = 'open' THEN 'open'
+            WHEN LOWER(TRIM(status)) = 'rejected' THEN 'rejected'
+            WHEN LOWER(TRIM(status)) = 'rolled_back' THEN 'rolled_back'
+            ELSE LOWER(TRIM(status))
+        END
+    """)
 
     conn.execute("""
         CREATE TABLE IF NOT EXISTS routing_rules (
@@ -1984,30 +2006,26 @@ def get_stats():
     conn = get_db()
     s = {
         "total_tickets":    conn.execute("SELECT COUNT(*) FROM tickets").fetchone()[0] * DEMO_SCALE,
-        # Only count tickets ingested via the API (created_at is recent)
-        # Historical ITSM dataset tickets have opened_at in 2012-2014 but created_at from setup
-        # We count "open" as tickets that are genuinely actionable (not the 46k historical ones)
         "open_tickets":     conn.execute("""
             SELECT COUNT(*) FROM tickets
-            WHERE status = 'open'
-            AND created_at >= datetime('now', '-30 days')
-        """).fetchone()[0],
-        "pending_approval": conn.execute("SELECT COUNT(*) FROM tickets WHERE status='pending_approval'").fetchone()[0],
+            WHERE LOWER(status) = 'open'
+        """).fetchone()[0] * DEMO_SCALE,
+        "pending_approval": conn.execute("""
+            SELECT COUNT(*) FROM tickets
+            WHERE LOWER(status) = 'pending_approval'
+        """).fetchone()[0] * DEMO_SCALE,
         "resolved":         conn.execute("""
             SELECT COUNT(*) FROM tickets
-            WHERE status = 'resolved'
-            AND created_at >= datetime('now', '-30 days')
-        """).fetchone()[0],
+            WHERE LOWER(status) = 'resolved'
+        """).fetchone()[0] * DEMO_SCALE,
         "p1_open":          conn.execute("""
             SELECT COUNT(*) FROM tickets
-            WHERE severity='P1' AND status!='resolved'
-            AND created_at >= datetime('now', '-30 days')
-        """).fetchone()[0],
+            WHERE severity='P1' AND LOWER(status) != 'resolved'
+        """).fetchone()[0] * DEMO_SCALE,
         "p2_open":          conn.execute("""
             SELECT COUNT(*) FROM tickets
-            WHERE severity='P2' AND status!='resolved'
-            AND created_at >= datetime('now', '-30 days')
-        """).fetchone()[0],
+            WHERE severity='P2' AND LOWER(status) != 'resolved'
+        """).fetchone()[0] * DEMO_SCALE,
         "predictions_run":  conn.execute("SELECT COUNT(*) FROM predictions").fetchone()[0] * DEMO_SCALE,
         "rca_completed":    conn.execute("SELECT COUNT(*) FROM rca_results").fetchone()[0] * DEMO_SCALE,
         "audit_events":     conn.execute("SELECT COUNT(*) FROM audit_log").fetchone()[0],
