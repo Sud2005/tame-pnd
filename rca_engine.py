@@ -38,6 +38,10 @@ EMBED_MODEL     = "all-MiniLM-L6-v2"    # fast, accurate, free, runs locally
 GROQ_MODEL      = "llama-3.3-70b-versatile"
 MIN_RESOLVED    = 5    # minimum resolved tickets needed before RCA is useful
 MAX_INDEX_SIZE  = 50000
+MIN_DEGRADED_RAW_CONF = 40
+MAX_DEGRADED_RAW_CONF = 80
+BASE_DEGRADED_RAW_CONF = 45
+SIMILARITY_CONF_WEIGHT = 0.35
 
 # Lazy-loaded globals (only built once at startup)
 _faiss_index    = None
@@ -520,8 +524,16 @@ def _synthesize_rca_without_llm(ticket: dict, similar: list[dict], error: str) -
     Build a ticket-specific RCA payload from similar incidents when Groq is
     unavailable. This avoids generic fallback output and keeps workflows usable.
     """
+    def _safe_text(value: object, max_len: int = 220) -> str:
+        text = str(value or "").replace("\n", " ").replace("\r", " ").replace("\t", " ")
+        text = " ".join(text.split())
+        return text[:max_len]
+
+    def _clamp(value: float, min_value: float, max_value: float) -> float:
+        return max(min_value, min(max_value, value))
+
     top = similar[0] if similar else {}
-    ticket_desc = (ticket.get("description") or "Incident reported").strip()
+    ticket_desc = _safe_text(ticket.get("description") or "Incident reported", 140)
     category = (ticket.get("category") or top.get("category") or "General").strip() or "General"
     severity = (ticket.get("severity") or "P3").strip() or "P3"
 
@@ -530,9 +542,9 @@ def _synthesize_rca_without_llm(ticket: dict, similar: list[dict], error: str) -
         top.get("closure_code") or
         "No prior explicit resolution notes were available."
     )
-    top_resolution = str(top_resolution).strip()
+    top_resolution = _safe_text(top_resolution, 260)
 
-    top_match_id = top.get("id", "N/A")
+    top_match_id = _safe_text(top.get("id", "N/A"), 40)
     top_match_pct = top.get("similarity_pct", 0)
     try:
         top_match_pct = float(top_match_pct)
@@ -542,7 +554,10 @@ def _synthesize_rca_without_llm(ticket: dict, similar: list[dict], error: str) -
     est_candidates = []
     for s in similar[:3]:
         try:
-            hrs = float(s.get("resolution_time_hrs"))
+            hrs_raw = s.get("resolution_time_hrs")
+            if hrs_raw is None:
+                continue
+            hrs = float(hrs_raw)
             if hrs > 0:
                 est_candidates.append(hrs)
         except Exception:
@@ -580,7 +595,11 @@ def _synthesize_rca_without_llm(ticket: dict, similar: list[dict], error: str) -
 
     # Degraded confidence is anchored to semantic match quality so downstream
     # confidence calibration remains meaningful even without LLM output.
-    degraded_raw_conf = int(max(40, min(80, 45 + (top_match_pct * 0.35))))
+    degraded_raw_conf = int(_clamp(
+        BASE_DEGRADED_RAW_CONF + (top_match_pct * SIMILARITY_CONF_WEIGHT),
+        MIN_DEGRADED_RAW_CONF,
+        MAX_DEGRADED_RAW_CONF,
+    ))
 
     return {
         "root_cause": root_cause,
