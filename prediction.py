@@ -113,17 +113,36 @@ def run_keyword_analysis(description: str, ci_cat: str = "", alert_status: str =
             break
 
     if suggested != "P1":
+        for kw in SECURITY_KEYWORDS:
+            if kw in desc:
+                flags.append(f"SECURITY_FLAG: '{kw}'")
+                suggested = "P1"   # Security always P1
+                break
+
+    if suggested != "P1":
         for kw in P2_KEYWORDS:
             if kw in desc:
                 flags.append(f"P2_SIGNAL: '{kw}'")
                 if not suggested:
                     suggested = "P2"
                 break
-
-    for kw in SECURITY_KEYWORDS:
-        if kw in desc:
-            flags.append(f"SECURITY_FLAG: '{kw}'")
-            suggested = "P1"   # Security always P1
+                
+    # Combinatorial Fuzzy Logic for predicting "close" to P1 tickets automatically
+    if not suggested:
+        import re
+        words = set(re.findall(r'[a-z]+', desc))
+        critical_components = {"production", "system", "site", "server", "database", "network", "cluster", "api", "infrastructure", "app"}
+        critical_failures   = {"down", "outage", "offline", "unreachable", "failing", "crashed", "corrupt", "dropped", "locked", "breached"}
+        
+        comp_match = critical_components.intersection(words)
+        fail_match = critical_failures.intersection(words)
+        if comp_match and fail_match:
+            flags.append(f"P1_PROXIMITY: '{list(comp_match)[0]}' + '{list(fail_match)[0]}'")
+            suggested = "P1"
+        elif comp_match and "slow" in words:
+            flags.append(f"P2_PROXIMITY: '{list(comp_match)[0]}' + 'slow'")
+            if not suggested:
+                suggested = "P2"
 
     return {
         "flags":              flags,
@@ -460,8 +479,6 @@ def predict_ticket(
             datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         ))
 
-        # Escalate severity in tickets table only from P3 (auto-detected default).
-        # Do NOT override P2 or P1 — respect the user's explicit severity choice.
         existing = conn.execute(
             "SELECT severity FROM tickets WHERE id=?", (ticket_id,)
         ).fetchone()
@@ -470,8 +487,8 @@ def predict_ticket(
             rank = {"P1":1,"P2":2,"P3":3}
             predicted_rank = rank.get(result["predicted_severity"], 3)
             existing_rank  = rank.get(existing_sev, 3)
-            # Only escalate when current severity is P3 (the default) and AI says higher
-            if existing_sev == "P3" and predicted_rank < existing_rank:
+            # Escalate if AI predicts a HIGHER priority (lower rank number)
+            if predicted_rank < existing_rank:
                 conn.execute(
                     "UPDATE tickets SET severity=? WHERE id=?",
                     (result["predicted_severity"], ticket_id)

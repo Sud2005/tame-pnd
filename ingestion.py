@@ -56,27 +56,27 @@ async def _ws_broadcast(message: dict):
 try:
     from prediction import predict_ticket, get_groq as get_prediction_groq
     PREDICTION_ENABLED = True
-    print("✅ Phase 2: Prediction engine loaded")
+    print("[OK] Phase 2: Prediction engine loaded")
 except ImportError:
     PREDICTION_ENABLED = False
     get_prediction_groq = None
-    print("⚠️  Phase 2: prediction.py not found")
+    print("[WARN] Phase 2: prediction.py not found")
 
 try:
     from rca_engine import run_rca, add_to_index, build_index
     RCA_ENABLED = True
-    print("✅ Phase 3: RCA engine loaded")
+    print("[OK] Phase 3: RCA engine loaded")
 except ImportError:
     RCA_ENABLED = False
-    print("⚠️  Phase 3: rca_engine.py not found")
+    print("[WARN] Phase 3: rca_engine.py not found")
 
 try:
     from cluster_detector import predict_incident_clusters, start_background_scanner
     CLUSTER_ENABLED = True
-    print("✅ Phase 4: Cluster detector loaded")
+    print("[OK] Phase 4: Cluster detector loaded")
 except ImportError:
     CLUSTER_ENABLED = False
-    print("⚠️  Phase 4: cluster_detector.py not found")
+    print("[WARN] Phase 4: cluster_detector.py not found")
 
 app = FastAPI(title="OpsAI API", version="4.0.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
@@ -86,16 +86,16 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], all
 async def startup_event():
     if RCA_ENABLED:
         try:
-            print("📥 Pre-loading FAISS index on startup...")
+            print("[INFO] Pre-loading FAISS index on startup...")
             build_index()
-            print("✅ FAISS index ready")
+            print("[OK] FAISS index ready")
         except Exception as e:
-            print(f"⚠️  FAISS index not ready: {e}")
+            print(f"[WARN] FAISS index not ready: {e}")
     if CLUSTER_ENABLED:
         try:
             start_background_scanner()
         except Exception as e:
-            print(f"⚠️  Cluster scanner not started: {e}")
+            print(f"[WARN] Cluster scanner not started: {e}")
 
 
 def get_db():
@@ -574,52 +574,72 @@ class RollbackRequest(BaseModel):
     rolled_back_by: Optional[str] = "operator"
 
 
-# ── Keyword engine — EXACT PHRASES ONLY ──────────────────────────────────────
-# Only runs when caller provides NO explicit severity.
-# Uses multi-word phrases to avoid false positives on words like "slow", "timeout".
-
-P1_PHRASES = [
+# ── Optimized Keyword Engine (Combinatorial & Exact) ──────────────────────────
+P1_EXACT = [
     "production down", "all users locked out", "complete outage",
-    "entire system down", "site down", "data loss confirmed",
-    "all services unreachable", "cluster failure", "all users affected",
+    "entire system down", "site down", "data loss", 
+    "all services unreachable", "cluster failure", "all users affected"
 ]
-P2_PHRASES = [
-    "partial outage", "subset of users affected", "service degraded",
-    "elevated error rate", "replication lag critical", "memory pressure critical",
+P2_EXACT = [
+    "partial outage", "subset of users", "service degraded",
+    "elevated error rate", "replication lag", "memory pressure"
 ]
-SECURITY_PHRASES = [
-    "unauthorized access detected", "data breach confirmed",
-    "ransomware detected", "malware detected", "active exploit",
+SECURITY_EXACT = [
+    "unauthorized access", "data breach", "ransomware", "malware", "exploit"
 ]
 
+# Fuzzy match dictionaries for efficient intersection
+CRITICAL_COMPONENTS = {"production", "system", "site", "server", "database", "network", "cluster", "api", "infrastructure", "app"}
+CRITICAL_FAILURES   = {"down", "outage", "offline", "unreachable", "failing", "crashed", "corrupt", "dropped", "locked", "breached"}
 
 def run_keyword_analysis(description: str, explicit_severity: str = None) -> dict:
-    # NEVER override explicit severity
-    if explicit_severity:
-        return {"flags": [], "suggested_severity": explicit_severity, "anomaly_detected": False}
-
     desc  = description.lower()
     flags = []
     suggested = None
 
-    for phrase in P1_PHRASES:
+    # 1. Exact Phrase Matching (Fastest)
+    for phrase in P1_EXACT:
         if phrase in desc:
             flags.append(f"P1: '{phrase}'")
             suggested = "P1"
             break
 
     if not suggested:
-        for phrase in P2_PHRASES:
+        for phrase in SECURITY_EXACT:
+            if phrase in desc:
+                flags.append(f"SECURITY: '{phrase}'")
+                suggested = "P1"
+                break
+
+    if not suggested:
+        for phrase in P2_EXACT:
             if phrase in desc:
                 flags.append(f"P2: '{phrase}'")
                 suggested = "P2"
                 break
 
-    for phrase in SECURITY_PHRASES:
-        if phrase in desc:
-            flags.append(f"SECURITY: '{phrase}'")
+    # 2. Combinatorial Fuzzy Matching (Optimized Proximity Check)
+    if not suggested:
+        import re
+        words = set(re.findall(r'[a-z]+', desc))
+        comp_match = CRITICAL_COMPONENTS.intersection(words)
+        fail_match = CRITICAL_FAILURES.intersection(words)
+        
+        if comp_match and fail_match:
+            flags.append(f"P1 Proximity: '{list(comp_match)[0]}' + '{list(fail_match)[0]}'")
             suggested = "P1"
-            break
+        elif comp_match and "slow" in words:
+            flags.append(f"P2 Proximity: '{list(comp_match)[0]}' + 'slow'")
+            suggested = "P2"
+
+    # If the user provided an explicit severity (e.g. from urgency dropdown), usually keep it.
+    # However, if keyword analysis detected a MORE SEVERE priority (e.g. P1 but user selected P3), escalate it.
+    if explicit_severity:
+        rank = {"P1": 1, "P2": 2, "P3": 3}
+        if suggested and rank.get(suggested, 3) < rank.get(explicit_severity, 3):
+            return {"flags": flags, "suggested_severity": suggested, "anomaly_detected": True}
+        else:
+            return {"flags": flags, "suggested_severity": explicit_severity, "anomaly_detected": False}
 
     return {"flags": flags, "suggested_severity": suggested, "anomaly_detected": bool(flags)}
 
@@ -750,8 +770,9 @@ def ingest_ticket(ticket: TicketIngest, bg: BackgroundTasks):
     tid  = f"INC{uuid.uuid4().hex[:8].upper()}"
     now  = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    # Resolve explicit severity first
-    explicit_sev = normalize_severity(ticket.severity) if ticket.severity else None
+    # Resolve explicit severity first. Use urgency as fallback if explicit severity not provided.
+    raw_sev_input = ticket.severity or ticket.urgency
+    explicit_sev = normalize_severity(raw_sev_input) if raw_sev_input else None
 
     # Keyword analysis — skips override if explicit_sev is set
     kw = run_keyword_analysis(ticket.description, explicit_sev)
@@ -772,6 +793,9 @@ def ingest_ticket(ticket: TicketIngest, bg: BackgroundTasks):
         affected_service=ticket.affected_service or "",
         ci_ids=ci_ids,
     )
+    
+    kw["flags"].append(f"TRACE: sev={ticket.severity!r} urg={ticket.urgency!r} raw={raw_sev_input!r} explicit={explicit_sev!r} suggested={kw.get('suggested_severity')!r} final={severity!r}")
+    
     assigned_group = ticket.assigned_group or routed_queue
 
     conn.execute("""
@@ -842,7 +866,8 @@ def bulk_ingest(tickets: List[BulkIngestItem], bg: BackgroundTasks):
     try:
         for ticket in tickets:
             tid          = f"INC{uuid.uuid4().hex[:8].upper()}"
-            explicit_sev = normalize_severity(ticket.severity) if ticket.severity else None
+            raw_sev_input = ticket.severity or ticket.urgency
+            explicit_sev = normalize_severity(raw_sev_input) if raw_sev_input else None
             kw           = run_keyword_analysis(ticket.description, explicit_sev)
             severity     = explicit_sev or kw["suggested_severity"] or "P3"
             if severity not in ("P1", "P2", "P3"):
