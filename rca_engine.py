@@ -578,6 +578,10 @@ def _synthesize_rca_without_llm(ticket: dict, similar: list[dict], error: str) -
             spct = 0.0
         citations.append(f"Past Incident #{i} ({sid}) — {spct:.1f}% match: {sdesc}")
 
+    # Degraded confidence is anchored to semantic match quality so downstream
+    # confidence calibration remains meaningful even without LLM output.
+    degraded_raw_conf = int(max(40, min(80, 45 + (top_match_pct * 0.35))))
+
     return {
         "root_cause": root_cause,
         "recommended_fix": recommended_fix,
@@ -586,7 +590,7 @@ def _synthesize_rca_without_llm(ticket: dict, similar: list[dict], error: str) -
         "pattern_match": f"{category} incident archetype recovered from semantic similarity index",
         "source_citations": citations,
         "warnings": f"LLM synthesis unavailable ({error[:120]}). Generated RCA from historical similarity.",
-        "raw_confidence": 58,
+        "raw_confidence": degraded_raw_conf,
     }
 
 
@@ -756,7 +760,7 @@ def run_rca(ticket_id: str) -> dict:
             print(f"⚠️  Groq unavailable, using local RCA synthesis: {llm_err}")
             parsed = _synthesize_rca_without_llm(ticket, similar, str(llm_err))
             model_used = "local_similarity_synthesis"
-            status = "success"
+            status = "degraded"
 
         # ── Step 4: Calibrate confidence + determine risk ─────────────────────
         # Don't trust the LLM's confidence blindly — calibrate with data
