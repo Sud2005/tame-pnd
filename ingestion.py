@@ -146,15 +146,6 @@ def ensure_schema_extensions(conn):
             WHEN LOWER(TRIM(status)) = 'rolled_back' THEN 'rolled_back'
             ELSE LOWER(TRIM(status))
         END
-        WHERE status IS NULL OR status != CASE
-            WHEN status IS NULL OR TRIM(status) = '' THEN 'open'
-            WHEN LOWER(TRIM(status)) IN ('resolved', 'close', 'closed') THEN 'resolved'
-            WHEN LOWER(TRIM(status)) IN ('pending_approval', 'pending approval', 'pending') THEN 'pending_approval'
-            WHEN LOWER(TRIM(status)) = 'open' THEN 'open'
-            WHEN LOWER(TRIM(status)) = 'rejected' THEN 'rejected'
-            WHEN LOWER(TRIM(status)) = 'rolled_back' THEN 'rolled_back'
-            ELSE LOWER(TRIM(status))
-        END
     """)
 
     conn.execute("""
