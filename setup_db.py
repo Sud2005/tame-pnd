@@ -76,6 +76,7 @@ CREATE TABLE IF NOT EXISTS rca_results (
     similarity_scores   TEXT,                   -- JSON array [0.92, 0.87, 0.81]
     confidence_score    INTEGER,
     risk_tier           TEXT,
+    fix_steps           TEXT,                   -- JSON array of detailed remediation steps
     created_at          TEXT DEFAULT (datetime('now')),
     FOREIGN KEY (ticket_id) REFERENCES tickets(id)
 );
@@ -300,6 +301,18 @@ def seed_tickets_from_csv(conn, csv_path):
     inserted = 0
     skipped  = 0
 
+    def _normalize_status(raw_status: str) -> str:
+        s = (raw_status or "resolved").strip().lower()
+        if s in ("resolved", "close", "closed"):
+            return "resolved"
+        if s in ("pending_approval", "pending approval", "pending"):
+            return "pending_approval"
+        if s == "open":
+            return "open"
+        if s in ("rejected", "rolled_back"):
+            return s
+        return "resolved"
+
     with open(csv_path, newline="", encoding="utf-8") as f:
         reader = csv.DictReader(f)
         for row in reader:
@@ -316,12 +329,12 @@ def seed_tickets_from_csv(conn, csv_path):
                     row.get("category"),
                     row.get("opened_at", ""),
                     row.get("resolved_at", ""),
-                    row.get("resolution_time_hrs") or None,
-                    row.get("resolution_notes") or row.get("Closure_Code") or row.get("closure_code") or "",
-                    row.get("assigned_group", "SUPPORT-TEAM"),
-                    row.get("resolved_by", "unknown"),
-                    row.get("status", "resolved"),
-                ))
+                     row.get("resolution_time_hrs") or None,
+                     row.get("resolution_notes") or row.get("Closure_Code") or row.get("closure_code") or "",
+                     row.get("assigned_group", "SUPPORT-TEAM"),
+                     row.get("resolved_by", "unknown"),
+                     _normalize_status(row.get("status", "resolved")),
+                 ))
                 inserted += 1
             except Exception as e:
                 skipped += 1

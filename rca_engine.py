@@ -196,7 +196,7 @@ def build_index(force_rebuild: bool = False) -> tuple:
         SELECT id, description, severity, category, resolution_notes,
                status
         FROM   tickets
-        WHERE  status = 'resolved'
+        WHERE  LOWER(status) = 'resolved'
           AND  resolution_notes IS NOT NULL
           AND  resolution_notes NOT IN ('', 'nan', 'None', 'NaN')
         ORDER  BY opened_at DESC
@@ -211,7 +211,7 @@ def build_index(force_rebuild: bool = False) -> tuple:
             SELECT id, description, severity, category, resolution_notes,
                    status
             FROM   tickets
-            WHERE  status = 'resolved'
+            WHERE  LOWER(status) = 'resolved'
             ORDER  BY opened_at DESC
             LIMIT  50000
         """).fetchall()
