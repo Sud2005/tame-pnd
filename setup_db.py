@@ -66,18 +66,26 @@ CREATE TABLE IF NOT EXISTS predictions (
 
 -- RCA results
 CREATE TABLE IF NOT EXISTS rca_results (
-    id                  TEXT PRIMARY KEY,
-    ticket_id           TEXT NOT NULL,
-    root_cause          TEXT,
-    recommended_fix     TEXT,
-    similar_incident_1  TEXT,                   -- ticket_id of similar case
-    similar_incident_2  TEXT,
-    similar_incident_3  TEXT,
-    similarity_scores   TEXT,                   -- JSON array [0.92, 0.87, 0.81]
-    confidence_score    INTEGER,
-    risk_tier           TEXT,
-    fix_steps           TEXT,                   -- JSON array of detailed remediation steps
-    created_at          TEXT DEFAULT (datetime('now')),
+    id                      TEXT PRIMARY KEY,
+    ticket_id               TEXT NOT NULL,
+    root_cause              TEXT,
+    recommended_fix         TEXT,
+    similar_incident_1      TEXT,                   -- ticket_id of similar case
+    similar_incident_2      TEXT,
+    similar_incident_3      TEXT,
+    similarity_scores       TEXT,                   -- JSON array [0.92, 0.87, 0.81]
+    confidence_score        INTEGER,
+    risk_tier               TEXT,
+    fix_steps               TEXT,                   -- JSON array of detailed remediation steps
+    approval_path           TEXT,                   -- A / B / C
+    warnings                TEXT,
+    pattern_match           TEXT,
+    source_citations        TEXT,                   -- JSON array of citation strings
+    estimated_resolution_hrs REAL,
+    model_used              TEXT,
+    rca_status              TEXT DEFAULT 'success', -- success / fallback
+    similar_incidents_json  TEXT,                   -- full JSON of similar_incidents array
+    created_at              TEXT DEFAULT (datetime('now')),
     FOREIGN KEY (ticket_id) REFERENCES tickets(id)
 );
 

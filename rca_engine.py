@@ -47,6 +47,11 @@ _index_ready    = False  # flag: True once index is fully loaded
 _groq_client    = None   # cached Groq client — created once, reused across requests
 _index_lock     = None   # threading lock for safe concurrent add_to_index calls
 
+# Initialise the lock at module load time to avoid race conditions when
+# multiple threads call add_to_index() before the lock is created.
+import threading as _threading
+_index_lock = _threading.Lock()
+
 
 # ── Embedding model ───────────────────────────────────────────────────────────
 
@@ -290,14 +295,9 @@ def add_to_index(ticket: dict):
     """
     global _faiss_index, _memory_store, _index_lock
     import faiss
-    import threading
 
     if _faiss_index is None:
         return
-
-    # Initialise lock lazily so it is always associated with the correct interpreter
-    if _index_lock is None:
-        _index_lock = threading.Lock()
 
     text   = build_ticket_text(ticket)
     vector = embed_text(text).reshape(1, -1)
@@ -732,8 +732,11 @@ def run_rca(ticket_id: str) -> dict:
             INSERT INTO rca_results
             (id, ticket_id, root_cause, recommended_fix,
              similar_incident_1, similar_incident_2, similar_incident_3,
-             similarity_scores, confidence_score, risk_tier, created_at, fix_steps)
-            VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+             similarity_scores, confidence_score, risk_tier, created_at, fix_steps,
+             approval_path, warnings, pattern_match, source_citations,
+             estimated_resolution_hrs, model_used, rca_status,
+             similar_incidents_json)
+            VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         """, (
             result["id"], result["ticket_id"],
             result["root_cause"], result["recommended_fix"],
@@ -745,6 +748,14 @@ def run_rca(ticket_id: str) -> dict:
             result["risk_tier"],
             now,
             json.dumps(result.get("fix_steps", [])),
+            result.get("approval_path", "C"),
+            result.get("warnings"),
+            result.get("pattern_match", ""),
+            json.dumps(result.get("source_citations", [])),
+            result.get("estimated_resolution_hrs", 2.0),
+            result.get("model_used", GROQ_MODEL),
+            result.get("status", "success"),
+            json.dumps(sim),
         ))
 
         # Update ticket status to pending_approval ONLY if still open

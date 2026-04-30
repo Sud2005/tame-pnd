@@ -129,10 +129,23 @@ def ensure_schema_extensions(conn):
         if col not in cols:
             conn.execute("ALTER TABLE tickets ADD COLUMN " + col + " " + col_type)
 
-    # Backward-compatible RCA schema migration (older DBs may miss this column)
+    # Backward-compatible RCA schema migration (older DBs may miss these columns)
     rca_cols = {row["name"] for row in conn.execute("PRAGMA table_info(rca_results)").fetchall()}
-    if rca_cols and "fix_steps" not in rca_cols:
-        conn.execute("ALTER TABLE rca_results ADD COLUMN fix_steps TEXT")
+    rca_column_migrations = [
+        ("fix_steps",               "TEXT"),
+        ("approval_path",           "TEXT"),
+        ("warnings",                "TEXT"),
+        ("pattern_match",           "TEXT"),
+        ("source_citations",        "TEXT"),
+        ("estimated_resolution_hrs","REAL"),
+        ("model_used",              "TEXT"),
+        ("rca_status",              "TEXT DEFAULT 'success'"),
+        ("similar_incidents_json",  "TEXT"),
+    ]
+    if rca_cols:
+        for col, col_type in rca_column_migrations:
+            if col not in rca_cols:
+                conn.execute(f"ALTER TABLE rca_results ADD COLUMN {col} {col_type}")
 
     # Normalize historical status values from imported CSVs to canonical values
     conn.execute("""
@@ -737,7 +750,9 @@ def bg_rca(ticket_id):
             except Exception as wse:
                 print(f"⚠️ WS broadcast failed in auto-approve: {wse}")
     except Exception as e:
-        print(f"⚠️  bg_rca ({ticket_id}): {e}")
+        import traceback
+        print(f"❌ bg_rca ({ticket_id}) FAILED: {e}")
+        traceback.print_exc()
 
 
 def bg_cluster():
@@ -983,44 +998,79 @@ def get_rca_result(ticket_id: str):
         return {"ticket_id": ticket_id, "status": "pending", "message": "RCA not ready. Retry in 4s."}
 
     result = dict(row)
+
+    # ── Always return the result, even if it's a fallback ────────────────────
+    # Map stored rca_status back to "status" field the dashboard expects
+    stored_status = result.pop("rca_status", None) or result.get("status", "success")
+    result["status"] = stored_status
+
     try:
         scores = json.loads(result.get("similarity_scores", "[]"))
     except Exception:
         scores = []
 
-    # Reconstruct full similar_incidents from stored IDs
-    similar_incidents = []
-    for i, id_field in enumerate(["similar_incident_1", "similar_incident_2", "similar_incident_3"]):
-        sid = result.get(id_field)
-        if not sid:
-            continue
-        t = conn.execute("SELECT * FROM tickets WHERE id=?", (sid,)).fetchone()
-        if t:
-            td = dict(t)
-            similar_incidents.append({
-                "id":             td["id"],
-                "description":    (td.get("description") or "")[:120],
-                "resolution":     td.get("resolution_notes") or "",
-                "severity":       td.get("severity", ""),
-                "category":       td.get("category", ""),
-                "mttr_hrs":       td.get("resolution_time_hrs", ""),
-                "similarity_score": scores[i] if i < len(scores) else 0,
-                "similarity_pct":   round(scores[i] * 100, 1) if i < len(scores) else 0,
-            })
+    # ── Prefer pre-serialised similar_incidents if available ─────────────────
+    raw_sim_json = result.pop("similar_incidents_json", None)
+    if raw_sim_json:
+        try:
+            similar_incidents = json.loads(raw_sim_json)
+        except Exception:
+            similar_incidents = None
+    else:
+        similar_incidents = None
+
+    # Fall back to reconstructing from stored IDs (older rows / schema migration)
+    if not similar_incidents:
+        similar_incidents = []
+        for i, id_field in enumerate(["similar_incident_1", "similar_incident_2", "similar_incident_3"]):
+            sid = result.get(id_field)
+            if not sid:
+                continue
+            t = conn.execute("SELECT * FROM tickets WHERE id=?", (sid,)).fetchone()
+            if t:
+                td = dict(t)
+                sim_score = scores[i] if i < len(scores) else 0
+                similar_incidents.append({
+                    "id":             td["id"],
+                    "description":    (td.get("description") or "")[:120],
+                    "resolution":     td.get("resolution_notes") or "",
+                    "severity":       td.get("severity", ""),
+                    "category":       td.get("category", ""),
+                    "mttr_hrs":       td.get("resolution_time_hrs", ""),
+                    "similarity_score": sim_score,
+                    "similarity_pct":   round(sim_score * 100, 1) if sim_score <= 1.0 else round(sim_score, 1),
+                })
 
     conn.close()
     result["similar_incidents"] = similar_incidents
     result["similarity_scores"] = scores
 
-    # Parse fix_steps from DB (stored as JSON string)
+    # ── Parse JSON string fields stored in DB ────────────────────────────────
     raw_steps = result.get("fix_steps")
     if raw_steps and isinstance(raw_steps, str):
         try:
             result["fix_steps"] = json.loads(raw_steps)
-        except Exception:
+        except Exception as e:
+            print(f"⚠️  fix_steps JSON parse failed for {ticket_id}: {e}")
             result["fix_steps"] = []
     elif not raw_steps:
         result["fix_steps"] = []
+
+    raw_citations = result.get("source_citations")
+    if raw_citations and isinstance(raw_citations, str):
+        try:
+            result["source_citations"] = json.loads(raw_citations)
+        except Exception:
+            result["source_citations"] = []
+    elif not raw_citations:
+        result["source_citations"] = []
+
+    # ── Ensure all fields the dashboard expects are present ──────────────────
+    result.setdefault("approval_path", "C")
+    result.setdefault("pattern_match", "")
+    result.setdefault("warnings", None)
+    result.setdefault("estimated_resolution_hrs", 2.0)
+    result.setdefault("model_used", "unknown")
 
     return result
 

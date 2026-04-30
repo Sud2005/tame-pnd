@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 
-const API = "http://localhost:8000";
+const API = "http://localhost:8001";
 
 // ── Design tokens ─────────────────────────────────────────────────────────────
 const COLORS = {
@@ -431,29 +431,62 @@ function RCADetail({ ticket, onApprove }) {
   useEffect(() => {
     if (!ticket) { setRca(null); setPred(null); setExecutions([]); setFedSignal(null); return; }
     setLoading(true);
+    let pollInterval = null;
+
+    function fetchFedSignal(category) {
+      apiFetch(`/federated/signal/${encodeURIComponent(category)}`).then(sig => {
+        if (sig && !sig._error && sig.contributing_orgs > 0) setFedSignal(sig);
+      }).catch(() => {});
+    }
+
     Promise.all([
       apiFetch(`/tickets/${ticket.id}/rca/result`),
       apiFetch(`/tickets/${ticket.id}/prediction`),
       apiFetch(`/tickets/${ticket.id}/executions`),
     ]).then(([r, p, ex]) => {
-      setRca(r?.status !== "pending" ? r : null);
+      const rcaReady = r && r.status !== "pending";
+      setRca(rcaReady ? r : null);
       setPred(p?.status !== "pending" ? p : null);
       setExecutions(ex?.executions || []);
       setLoading(false);
-      // Fetch federated signal if we have a category
+
       const cat = p?.predicted_category || ticket.category || "General";
-      apiFetch(`/federated/signal/${encodeURIComponent(cat)}`).then(sig => {
-        if (sig && !sig._error && sig.contributing_orgs > 0) setFedSignal(sig);
-      }).catch(() => {});
+      fetchFedSignal(cat);
+
+      // If RCA is still running in the background, auto-poll until it's ready
+      if (!rcaReady) {
+        let attempts = 0;
+        pollInterval = setInterval(async () => {
+          attempts++;
+          const result = await apiFetch(`/tickets/${ticket.id}/rca/result`);
+          if (result && result.status !== "pending") {
+            clearInterval(pollInterval);
+            pollInterval = null;
+            setRca(result);
+          } else if (attempts >= 20) {
+            // Give up after 60s — show Run RCA button
+            clearInterval(pollInterval);
+            pollInterval = null;
+          }
+        }, 3000);
+      }
     });
+
+    return () => { if (pollInterval) clearInterval(pollInterval); };
   }, [ticket?.id]);
 
   async function triggerRCA() {
     setTriggering(true);
+    // First check if a result already exists (e.g. background task already finished)
+    const existing = await apiFetch(`/tickets/${ticket.id}/rca/result`);
+    if (existing && existing.status !== "pending") {
+      setRca(existing);
+      setTriggering(false);
+      return;
+    }
     await apiFetch(`/tickets/${ticket.id}/rca`, { method: "POST" });
-    // Poll for result every 3s, up to 10 attempts (30s total)
+    // Poll for result every 3s, up to 20 attempts (60s total)
     let attempts = 0;
-    const maxAttempts = 10;
     const poll = setInterval(async () => {
       attempts++;
       const r = await apiFetch(`/tickets/${ticket.id}/rca/result`);
@@ -461,10 +494,9 @@ function RCADetail({ ticket, onApprove }) {
         clearInterval(poll);
         setRca(r);
         setTriggering(false);
-      } else if (attempts >= maxAttempts) {
+      } else if (attempts >= 20) {
         clearInterval(poll);
         setTriggering(false);
-        // Show whatever we got (even fallback)
         if (r) setRca(r);
       }
     }, 3000);
